@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ontology-studio-backend"
+version = "0.1.0"
+description = "Backend service for Ontology Studio."
+requires-python = ">=3.12"
+dependencies = [
+    "deepagents",
+    "fastapi",
+    "langchain-core",
+    "langchain-openai",
+    "neo4j",
+    "python-dotenv",
+    "python-multipart",
+    "uvicorn",
+]
+
+[project.scripts]
+ontology-studio-backend = "backend.src.host.main:main"
+
+[tool.setuptools.packages.find]
+include = ["backend*"]

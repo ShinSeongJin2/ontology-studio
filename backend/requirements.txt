@@ -1,8 +1,0 @@
-fastapi
-uvicorn
-python-dotenv
-python-multipart
-neo4j
-langchain-core
-langchain-openai
-deepagents
