@@ -54,7 +54,7 @@
 
     <main class="workspace-main">
       <OntologyBuildBriefPanel
-        v-if="mode === 'build'"
+        v-if="mode === 'build' && messages.length === 0"
         :can-start="isBuildBriefReady"
         :golden-questions="buildGoldenQuestions"
         :intent="buildIntent"
@@ -67,20 +67,21 @@
       />
 
       <ChatPanel
-      :can-send="canSend"
-      :can-submit-build-feedback="canSubmitBuildFeedback"
-      v-model:input-text="inputText"
-      :examples="examples"
-      :input-placeholder="effectiveInputPlaceholder"
-      :is-neo4j-tool="isNeo4jTool"
-      :is-streaming="isStreaming"
-      :messages="messages"
-      :mode-description="currentModeMeta.description"
-      :mode-label="currentModeMeta.label"
-      @download="downloadFile"
-      @send="send"
-      @send-example="send"
-      @submit-build-feedback="submitBuildFeedback"
+        v-else
+        :can-send="canSend"
+        :can-submit-build-feedback="canSubmitBuildFeedback"
+        v-model:input-text="inputText"
+        :examples="examples"
+        :input-placeholder="effectiveInputPlaceholder"
+        :is-neo4j-tool="isNeo4jTool"
+        :is-streaming="isStreaming"
+        :messages="messages"
+        :mode-description="currentModeMeta.description"
+        :mode-label="currentModeMeta.label"
+        @download="downloadFile"
+        @send="send"
+        @send-example="send"
+        @submit-build-feedback="submitBuildFeedback"
       />
     </main>
 
