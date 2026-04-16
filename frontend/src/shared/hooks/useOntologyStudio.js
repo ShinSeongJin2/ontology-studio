@@ -373,7 +373,8 @@ export function useOntologyStudio() {
     }
 
     const names = await uploadFiles(fileList)
-    if (names.length) {
+    const shouldNotifyInChat = mode.value !== 'build' || getModeState().messages.length > 0
+    if (names.length && shouldNotifyInChat) {
       getModeState().messages.push({
         role: 'user',
         text: `파일 업로드: ${names.join(', ')}`,

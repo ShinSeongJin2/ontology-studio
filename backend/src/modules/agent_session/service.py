@@ -143,6 +143,7 @@ _BUILD_REPORT_PATTERN = re.compile(
     r"```ontology_build_report\s*(\{.*?\})\s*```",
     re.DOTALL,
 )
+_TEXT_CONTENT_BLOCK_TYPES = {"text", "output_text"}
 
 
 def _clean_text(value: Any) -> str:
@@ -311,6 +312,56 @@ def _extract_build_report(
         "next_action": _clean_text(payload.get("next_action")),
         "golden_questions": normalized_items,
     }
+
+
+def _extract_text_from_content(content: Any) -> str:
+    """Extract assistant-visible text from LangChain/OpenAI content blocks."""
+
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(_extract_text_from_content(item) for item in content)
+    if isinstance(content, dict):
+        block_type = _clean_text(content.get("type"))
+        if block_type in _TEXT_CONTENT_BLOCK_TYPES:
+            return _extract_text_from_content(content.get("text"))
+        if "content" in content:
+            nested = _extract_text_from_content(content.get("content"))
+            if nested:
+                return nested
+        if "output" in content:
+            nested = _extract_text_from_content(content.get("output"))
+            if nested:
+                return nested
+        if isinstance(content.get("text"), str):
+            return content["text"]
+        if isinstance(content.get("text"), dict):
+            return _extract_text_from_content(content["text"])
+    return ""
+
+
+def _merge_stream_text(current_text: str, incoming_text: str) -> tuple[str, str]:
+    """Append only the new delta when updates repeat the full assistant text."""
+
+    if not incoming_text:
+        return current_text, ""
+    if not current_text:
+        return incoming_text, incoming_text
+    if incoming_text == current_text or current_text.endswith(incoming_text):
+        return current_text, ""
+    if incoming_text.startswith(current_text):
+        delta = incoming_text[len(current_text) :]
+        return incoming_text, delta
+
+    max_overlap = min(len(current_text), len(incoming_text))
+    for overlap in range(max_overlap, 0, -1):
+        if current_text.endswith(incoming_text[:overlap]):
+            delta = incoming_text[overlap:]
+            return current_text + delta, delta
+
+    return current_text + incoming_text, incoming_text
 
 
 def _normalize_openai_model_name(model_name: str) -> str:
@@ -524,7 +575,9 @@ async def generate_sse(
     seen_skills: set[str] = set()
     seen_refs: set[str] = set()
     pending_tool_names: dict[str, str] = {}
-    assistant_text_parts: list[str] = []
+    emitted_tool_starts: set[str] = set()
+    emitted_tool_results: set[str] = set()
+    assistant_text = ""
 
     while True:
         item = await queue.get()
@@ -541,33 +594,26 @@ async def generate_sse(
             node = metadata.get("langgraph_node", "")
 
             if isinstance(msg_chunk, AIMessageChunk):
-                if msg_chunk.content:
-                    text = ""
-                    if isinstance(msg_chunk.content, str):
-                        text = msg_chunk.content
-                    elif isinstance(msg_chunk.content, list):
-                        for block in msg_chunk.content:
-                            if isinstance(block, dict) and block.get("type") == "text":
-                                text += block.get("text", "")
-                            elif isinstance(block, str):
-                                text += block
-                    if text:
-                        assistant_text_parts.append(text)
-                        yield _format_sse("token", {"text": text, "node": node})
+                text = _extract_text_from_content(msg_chunk.content)
+                assistant_text, delta = _merge_stream_text(assistant_text, text)
+                if delta and not delta.lstrip().startswith("<|"):
+                    yield _format_sse("token", {"text": delta, "node": node})
 
                 if msg_chunk.tool_call_chunks:
                     for tool_call in msg_chunk.tool_call_chunks:
                         tool_call_id = tool_call.get("id") or str(tool_call.get("index", ""))
                         if tool_call_id and tool_call.get("name"):
                             pending_tool_names[tool_call_id] = tool_call["name"]
-                            yield _format_sse(
-                                "tool_start",
-                                {
-                                    "tool_call_id": tool_call_id,
-                                    "name": tool_call["name"],
-                                    "node": node,
-                                },
-                            )
+                            if tool_call_id not in emitted_tool_starts:
+                                emitted_tool_starts.add(tool_call_id)
+                                yield _format_sse(
+                                    "tool_start",
+                                    {
+                                        "tool_call_id": tool_call_id,
+                                        "name": tool_call["name"],
+                                        "node": node,
+                                    },
+                                )
 
             elif isinstance(msg_chunk, ToolMessage):
                 content = msg_chunk.content if isinstance(msg_chunk.content, str) else str(msg_chunk.content)
@@ -579,15 +625,19 @@ async def generate_sse(
                     seen_refs,
                 ):
                     yield event
-                yield _format_sse(
-                    "tool_result",
-                    {
-                        "tool_call_id": msg_chunk.tool_call_id or "",
-                        "name": tool_name,
-                        "content": content[:3000],
-                        "node": node,
-                    },
-                )
+                result_key = msg_chunk.tool_call_id or ""
+                if not result_key or result_key not in emitted_tool_results:
+                    if result_key:
+                        emitted_tool_results.add(result_key)
+                    yield _format_sse(
+                        "tool_result",
+                        {
+                            "tool_call_id": msg_chunk.tool_call_id or "",
+                            "name": tool_name,
+                            "content": content[:3000],
+                            "node": node,
+                        },
+                    )
 
         elif event_mode == "updates":
             for node_name, node_data in payload.items():
@@ -607,31 +657,29 @@ async def generate_sse(
 
                     for message in raw_messages:
                         if isinstance(message, AIMessage):
-                            if message.content:
-                                text = (
-                                    message.content
-                                    if isinstance(message.content, str)
-                                    else str(message.content)
+                            text = _extract_text_from_content(message.content)
+                            assistant_text, delta = _merge_stream_text(assistant_text, text)
+                            if delta.strip() and not delta.lstrip().startswith("<|"):
+                                yield _format_sse(
+                                    "token",
+                                    {"text": delta, "node": node_name},
                                 )
-                                if text.strip() and not text.startswith("<|"):
-                                    assistant_text_parts.append(text)
-                                    yield _format_sse(
-                                        "token",
-                                        {"text": text, "node": node_name},
-                                    )
                             if message.tool_calls:
                                 for tool_call in message.tool_calls:
                                     tool_name = tool_call.get("name", "")
                                     tool_call_id = tool_call.get("id", "")
                                     pending_tool_names[tool_call_id] = tool_name
-                                    yield _format_sse(
-                                        "tool_start",
-                                        {
-                                            "tool_call_id": tool_call_id,
-                                            "name": tool_name,
-                                            "node": node_name,
-                                        },
-                                    )
+                                    if not tool_call_id or tool_call_id not in emitted_tool_starts:
+                                        if tool_call_id:
+                                            emitted_tool_starts.add(tool_call_id)
+                                        yield _format_sse(
+                                            "tool_start",
+                                            {
+                                                "tool_call_id": tool_call_id,
+                                                "name": tool_name,
+                                                "node": node_name,
+                                            },
+                                        )
                         elif isinstance(message, ToolMessage):
                             content = (
                                 message.content
@@ -646,20 +694,24 @@ async def generate_sse(
                                 seen_refs,
                             ):
                                 yield event
-                            yield _format_sse(
-                                "tool_result",
-                                {
-                                    "tool_call_id": message.tool_call_id or "",
-                                    "name": tool_name,
-                                    "content": content[:3000],
-                                    "node": node_name,
-                                },
-                            )
+                            result_key = message.tool_call_id or ""
+                            if not result_key or result_key not in emitted_tool_results:
+                                if result_key:
+                                    emitted_tool_results.add(result_key)
+                                yield _format_sse(
+                                    "tool_result",
+                                    {
+                                        "tool_call_id": message.tool_call_id or "",
+                                        "name": tool_name,
+                                        "content": content[:3000],
+                                        "node": node_name,
+                                    },
+                                )
 
                 yield _format_sse("node_update", {"node": node_name})
 
     all_files = list_output_filenames() or generated_files
-    final_text = "".join(assistant_text_parts).strip()
+    final_text = assistant_text.strip()
     build_report = None
     if mode == "build":
         final_text, build_report = _extract_build_report(final_text, build_context)
