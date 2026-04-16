@@ -21,6 +21,30 @@
         <div v-if="msg.role === 'user'" class="msg msg-user">
           <div class="msg-bubble">
             <div class="msg-text">{{ msg.text }}</div>
+            <div v-if="msg.buildBrief" class="msg-brief">
+              <div class="msg-brief-intent">
+                <strong>의도</strong>
+                <span>{{ msg.buildBrief.intent }}</span>
+              </div>
+              <div class="msg-brief-questions">
+                <strong>Golden Question</strong>
+                <ul>
+                  <li v-for="question in msg.buildBrief.goldenQuestions" :key="question">
+                    {{ question }}
+                  </li>
+                </ul>
+              </div>
+            </div>
+            <div v-if="msg.buildFeedback?.length" class="msg-brief">
+              <div class="msg-brief-questions">
+                <strong>개선 피드백</strong>
+                <ul>
+                  <li v-for="item in msg.buildFeedback" :key="item.question">
+                    {{ item.question }}: {{ item.feedback || (item.verdict === 'correct' ? '정답 처리' : '수정 필요') }}
+                  </li>
+                </ul>
+              </div>
+            </div>
             <div v-if="msg.files && msg.files.length" class="msg-files">
               <span v-for="file in msg.files" :key="file" class="msg-file-chip">{{ file }}</span>
             </div>
@@ -61,6 +85,16 @@
                 {{ file }}
               </button>
             </div>
+
+            <GoldenQuestionReviewPanel
+              v-if="msg.buildReport"
+              :can-submit="canSubmitBuildFeedback(msg)"
+              :is-streaming="isStreaming"
+              :report="msg.buildReport"
+              @set-verdict="(reviewIndex, verdict) => setBuildVerdict(msg, reviewIndex, verdict)"
+              @submit-feedback="$emit('submit-build-feedback', msg)"
+              @update-feedback="(reviewIndex, value) => updateBuildFeedback(msg, reviewIndex, value)"
+            />
           </div>
         </div>
       </template>
@@ -82,7 +116,7 @@
         />
         <button
           class="btn-send"
-          :disabled="isStreaming || !inputText.trim()"
+          :disabled="!canSend"
           @click="$emit('send')"
         >
           &#10148;
@@ -93,14 +127,24 @@
 </template>
 
 <script setup>
+import GoldenQuestionReviewPanel from '../ontology/GoldenQuestionReviewPanel.vue'
+
 const inputText = defineModel('inputText', {
   type: String,
   default: '',
 })
 
-defineProps({
+const props = defineProps({
   examples: {
     type: Array,
+    required: true,
+  },
+  canSend: {
+    type: Boolean,
+    required: true,
+  },
+  canSubmitBuildFeedback: {
+    type: Function,
     required: true,
   },
   inputPlaceholder: {
@@ -129,12 +173,33 @@ defineProps({
   },
 })
 
-const emit = defineEmits(['download', 'send', 'send-example'])
+const emit = defineEmits(['download', 'send', 'send-example', 'submit-build-feedback'])
+
+function setBuildVerdict(message, index, verdict) {
+  const item = message?.buildReport?.goldenQuestions?.[index]
+  if (!item) {
+    return
+  }
+  item.verdict = item.verdict === verdict ? null : verdict
+  if (item.verdict !== 'incorrect') {
+    item.feedback = ''
+  }
+}
+
+function updateBuildFeedback(message, index, value) {
+  const item = message?.buildReport?.goldenQuestions?.[index]
+  if (!item) {
+    return
+  }
+  item.feedback = value
+}
 
 function onEnter(event) {
   if (!event.shiftKey) {
     event.preventDefault()
-    emit('send')
+    if (props.canSend) {
+      emit('send')
+    }
   }
 }
 </script>

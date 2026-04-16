@@ -7,7 +7,7 @@ import json
 import re
 import threading
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, ToolMessage
 
@@ -63,6 +63,30 @@ ONTOLOGY_BUILD_SYSTEM_PROMPT = """\
 - 파일은 /workspace/uploads/에서 읽고, /workspace/output/에 저장하세요
 - 각 도구 호출 전에 한국어로 간단히 설명하세요
 - 대량의 엔티티를 추출할 때는 문서를 섹션별로 나누어 처리하세요
+- 사용자가 제공한 구축 의도(intent)와 Golden Question을 최우선 목표로 삼으세요
+- 온톨로지 구축 완료 기준은 "현재 그래프와 스키마만으로 Golden Question에 답할 수 있는가" 입니다
+- Golden Question에 충분히 답하지 못하면 스키마와 추출 결과를 추가로 보강하세요
+- 사용자가 이전 결과에 대해 틀렸다고 표시한 항목과 피드백을 받으면, 그 이유를 해결하도록 스키마와 추출 전략을 조정하세요
+
+## 최종 응답 형식
+- 사람이 읽는 한국어 요약을 먼저 작성하세요
+- 마지막에는 아래 형식의 JSON 코드 블록을 반드시 포함하세요
+
+```ontology_build_report
+{
+  "intent": "사용자 구축 의도",
+  "summary": "이번 구축/개선으로 무엇을 맞췄는지 한 줄 요약",
+  "next_action": "사용자에게 요청할 다음 검토 액션 또는 남은 한계",
+  "golden_questions": [
+    {
+      "question": "Golden Question 원문",
+      "answer": "현재 온톨로지가 제공하도록 만든 답변 또는 답변 초안",
+      "status": "answerable | partially_answerable | not_yet_answerable",
+      "confidence": "high | medium | low"
+    }
+  ]
+}
+```
 """
 
 ONTOLOGY_ANSWER_SYSTEM_PROMPT = """\
@@ -114,6 +138,179 @@ _ANSWER_MODE_TOOLS = [
     entity_search,
     neo4j_cypher_readonly,
 ]
+
+_BUILD_REPORT_PATTERN = re.compile(
+    r"```ontology_build_report\s*(\{.*?\})\s*```",
+    re.DOTALL,
+)
+
+
+def _clean_text(value: Any) -> str:
+    """Normalize arbitrary values into stripped strings."""
+
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def _parse_build_context(raw_context: str | None) -> dict[str, Any]:
+    """Parse optional build context provided by the frontend."""
+
+    default_context = {
+        "intent": "",
+        "golden_questions": [],
+        "review_feedback": [],
+    }
+    if not raw_context:
+        return default_context
+
+    try:
+        payload = json.loads(raw_context)
+    except json.JSONDecodeError:
+        return default_context
+
+    golden_questions = [
+        _clean_text(item)
+        for item in payload.get("golden_questions", [])
+        if _clean_text(item)
+    ]
+    review_feedback = []
+    for item in payload.get("review_feedback", []):
+        if not isinstance(item, dict):
+            continue
+        question = _clean_text(item.get("question"))
+        if not question:
+            continue
+        review_feedback.append(
+            {
+                "question": question,
+                "answer": _clean_text(item.get("answer")),
+                "status": _clean_text(item.get("status")) or "answerable",
+                "verdict": _clean_text(item.get("verdict")),
+                "feedback": _clean_text(item.get("feedback")),
+            }
+        )
+
+    return {
+        "intent": _clean_text(payload.get("intent")),
+        "golden_questions": golden_questions,
+        "review_feedback": review_feedback,
+    }
+
+
+def _compose_build_prompt(prompt: str, build_context: dict[str, Any]) -> str:
+    """Inject build intent, golden questions, and review feedback into the prompt."""
+
+    sections = [f"[사용자 작업 요청]\n{prompt.strip()}"]
+
+    if build_context["intent"]:
+        sections.append(f"[구축 의도]\n{build_context['intent']}")
+
+    if build_context["golden_questions"]:
+        golden_question_lines = "\n".join(
+            f"{index}. {question}"
+            for index, question in enumerate(build_context["golden_questions"], start=1)
+        )
+        sections.append(
+            "[Golden Question]\n"
+            "아래 질문들에 답할 수 있는 온톨로지 스키마와 그래프를 구축하세요.\n"
+            f"{golden_question_lines}"
+        )
+
+    if build_context["review_feedback"]:
+        feedback_lines = []
+        for index, item in enumerate(build_context["review_feedback"], start=1):
+            feedback_lines.append(
+                "\n".join(
+                    [
+                        f"{index}. 질문: {item['question']}",
+                        f"   이전 판정: {item['verdict'] or '미지정'}",
+                        f"   이전 상태: {item['status']}",
+                        f"   기존 답변: {item['answer'] or '없음'}",
+                        f"   사용자 피드백: {item['feedback'] or '없음'}",
+                    ]
+                )
+            )
+        sections.append(
+            "[이전 결과 검토 피드백]\n"
+            "아래 항목에서 사용자가 문제를 지적했습니다. 이를 해결하도록 온톨로지를 개선하세요.\n"
+            + "\n".join(feedback_lines)
+        )
+
+    sections.append(
+        "[완료 기준]\n"
+        "- 현재 온톨로지 스키마와 그래프만으로 Golden Question에 답할 수 있어야 합니다.\n"
+        "- 최종 응답 마지막에는 ontology_build_report JSON 코드 블록을 반드시 포함하세요.\n"
+        "- report의 question은 사용자가 입력한 Golden Question과 동일한 문장을 유지하세요."
+    )
+    return "\n\n".join(section for section in sections if section.strip())
+
+
+def _normalize_build_report_question(
+    item: dict[str, Any],
+    fallback_question: str,
+) -> dict[str, str]:
+    """Normalize a single build report question entry."""
+
+    return {
+        "question": _clean_text(item.get("question")) or fallback_question,
+        "answer": _clean_text(item.get("answer")),
+        "status": _clean_text(item.get("status")) or "answerable",
+        "confidence": _clean_text(item.get("confidence")) or "medium",
+    }
+
+
+def _extract_build_report(
+    text: str,
+    build_context: dict[str, Any],
+) -> tuple[str, dict[str, Any] | None]:
+    """Split the visible assistant text from the structured build report."""
+
+    if not text:
+        return "", None
+
+    match = _BUILD_REPORT_PATTERN.search(text)
+    if not match:
+        return text.strip(), None
+
+    try:
+        payload = json.loads(match.group(1))
+    except json.JSONDecodeError:
+        cleaned_text = _BUILD_REPORT_PATTERN.sub("", text).strip()
+        return cleaned_text, None
+
+    raw_items = payload.get("golden_questions", [])
+    normalized_items = []
+    fallback_questions = build_context.get("golden_questions", [])
+    if isinstance(raw_items, list):
+        for index, raw_item in enumerate(raw_items):
+            if not isinstance(raw_item, dict):
+                continue
+            fallback_question = (
+                fallback_questions[index] if index < len(fallback_questions) else ""
+            )
+            normalized_items.append(
+                _normalize_build_report_question(raw_item, fallback_question)
+            )
+
+    if not normalized_items and fallback_questions:
+        normalized_items = [
+            {
+                "question": question,
+                "answer": "",
+                "status": "not_yet_answerable",
+                "confidence": "low",
+            }
+            for question in fallback_questions
+        ]
+
+    cleaned_text = _BUILD_REPORT_PATTERN.sub("", text).strip()
+    return cleaned_text, {
+        "intent": _clean_text(payload.get("intent")) or build_context.get("intent", ""),
+        "summary": _clean_text(payload.get("summary")),
+        "next_action": _clean_text(payload.get("next_action")),
+        "golden_questions": normalized_items,
+    }
 
 
 def _normalize_openai_model_name(model_name: str) -> str:
@@ -282,48 +479,64 @@ def _run_agent_in_thread(
 
         settings = get_settings()
         stream_modes = ["messages", "updates"] if not settings.openai_base_url else ["updates"]
-        for mode, payload in agent.stream(
+        for event_mode, payload in agent.stream(
             {"messages": list(history)},
             stream_mode=stream_modes,
         ):
-            loop.call_soon_threadsafe(queue.put_nowait, (mode, payload))
+            loop.call_soon_threadsafe(queue.put_nowait, (event_mode, payload))
     except Exception as exc:  # pragma: no cover - passthrough error handling
         loop.call_soon_threadsafe(queue.put_nowait, ("__error__", str(exc)))
     finally:
         loop.call_soon_threadsafe(queue.put_nowait, _SENTINEL)
 
 
-async def generate_sse(prompt: str, session_id: str, mode: AgentMode = "build"):
+async def generate_sse(
+    prompt: str,
+    session_id: str,
+    mode: AgentMode = "build",
+    raw_build_context: str | None = None,
+):
     """Yield streaming agent events as SSE messages."""
 
+    build_context = _parse_build_context(raw_build_context if mode == "build" else "")
+    effective_prompt = (
+        _compose_build_prompt(prompt, build_context) if mode == "build" else prompt
+    )
     queue: asyncio.Queue = asyncio.Queue()
     loop = asyncio.get_running_loop()
     thread = threading.Thread(
         target=_run_agent_in_thread,
-        args=(prompt, session_id, mode, queue, loop),
+        args=(effective_prompt, session_id, mode, queue, loop),
         daemon=True,
     )
     thread.start()
 
     mode_label = "온톨로지 구축" if mode == "build" else "질문 응답"
-    yield _format_sse("status", {"message": f"{mode_label} 모드 실행 시작..."})
+    status_message = f"{mode_label} 모드 실행 시작..."
+    if mode == "build" and build_context["golden_questions"]:
+        status_message = (
+            f"{mode_label} 모드 실행 시작... "
+            f"{len(build_context['golden_questions'])}개의 Golden Question 기준으로 구축합니다."
+        )
+    yield _format_sse("status", {"message": status_message})
 
     generated_files: list[str] = []
     seen_skills: set[str] = set()
     seen_refs: set[str] = set()
     pending_tool_names: dict[str, str] = {}
+    assistant_text_parts: list[str] = []
 
     while True:
         item = await queue.get()
         if item is _SENTINEL:
             break
 
-        mode, payload = item
-        if mode == "__error__":
+        event_mode, payload = item
+        if event_mode == "__error__":
             yield _format_sse("error_event", {"message": str(payload)})
             break
 
-        if mode == "messages":
+        if event_mode == "messages":
             msg_chunk, metadata = payload
             node = metadata.get("langgraph_node", "")
 
@@ -339,6 +552,7 @@ async def generate_sse(prompt: str, session_id: str, mode: AgentMode = "build"):
                             elif isinstance(block, str):
                                 text += block
                     if text:
+                        assistant_text_parts.append(text)
                         yield _format_sse("token", {"text": text, "node": node})
 
                 if msg_chunk.tool_call_chunks:
@@ -375,7 +589,7 @@ async def generate_sse(prompt: str, session_id: str, mode: AgentMode = "build"):
                     },
                 )
 
-        elif mode == "updates":
+        elif event_mode == "updates":
             for node_name, node_data in payload.items():
                 if node_name.startswith("__"):
                     continue
@@ -400,6 +614,7 @@ async def generate_sse(prompt: str, session_id: str, mode: AgentMode = "build"):
                                     else str(message.content)
                                 )
                                 if text.strip() and not text.startswith("<|"):
+                                    assistant_text_parts.append(text)
                                     yield _format_sse(
                                         "token",
                                         {"text": text, "node": node_name},
@@ -444,4 +659,17 @@ async def generate_sse(prompt: str, session_id: str, mode: AgentMode = "build"):
                 yield _format_sse("node_update", {"node": node_name})
 
     all_files = list_output_filenames() or generated_files
-    yield _format_sse("done", {"message": "완료!", "files": all_files})
+    final_text = "".join(assistant_text_parts).strip()
+    build_report = None
+    if mode == "build":
+        final_text, build_report = _extract_build_report(final_text, build_context)
+
+    yield _format_sse(
+        "done",
+        {
+            "message": "완료!",
+            "files": all_files,
+            "text": final_text,
+            "build_report": build_report,
+        },
+    )

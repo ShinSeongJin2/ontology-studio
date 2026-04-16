@@ -645,6 +645,151 @@ body {
   border-color: var(--text-muted);
 }
 
+.workspace-main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.build-brief-card {
+  max-width: 800px;
+  margin: 20px auto 0;
+  padding: 18px 20px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+}
+
+.build-brief-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+
+.build-brief-header h3 {
+  margin: 0 0 6px;
+  font-size: 1rem;
+}
+
+.build-brief-header p {
+  margin: 0;
+  color: var(--text-muted);
+  line-height: 1.5;
+  font-size: 0.88rem;
+}
+
+.btn-build-start {
+  flex-shrink: 0;
+  padding: 10px 14px;
+  border: none;
+  border-radius: 10px;
+  background: linear-gradient(135deg, var(--neo4j), var(--purple));
+  color: white;
+  font-size: 0.82rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.btn-build-start:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.build-brief-field {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.build-brief-field > span,
+.build-brief-field-header > span {
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.build-brief-field textarea,
+.build-brief-field input,
+.golden-review-item textarea {
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: rgba(13, 17, 23, 0.6);
+  color: var(--text);
+  font: inherit;
+  padding: 10px 12px;
+  resize: vertical;
+  outline: none;
+}
+
+.build-brief-field-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.golden-question-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.golden-question-item {
+  display: flex;
+  gap: 10px;
+}
+
+.golden-question-item input {
+  flex: 1;
+}
+
+.btn-inline-add,
+.btn-inline-remove,
+.btn-review-action {
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: transparent;
+  color: var(--text);
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+
+.btn-inline-add:disabled,
+.btn-inline-remove:disabled,
+.btn-review-action:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.build-brief-footer {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.build-brief-validation {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: rgba(210, 153, 34, 0.08);
+  border: 1px solid rgba(210, 153, 34, 0.2);
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+.build-brief-validation.ready {
+  background: rgba(46, 160, 67, 0.08);
+  border-color: rgba(46, 160, 67, 0.25);
+  color: #7ee787;
+}
+
 .chat-main {
   flex: 1;
   display: flex;
@@ -745,6 +890,25 @@ body {
   max-width: 70%;
   font-size: 0.9rem;
   line-height: 1.5;
+}
+
+.msg-brief {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid rgba(255, 255, 255, 0.18);
+}
+
+.msg-brief-intent,
+.msg-brief-questions {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 0.8rem;
+}
+
+.msg-brief-questions ul {
+  margin: 0;
+  padding-left: 18px;
 }
 
 .msg-files {
@@ -877,6 +1041,106 @@ body {
   flex-wrap: wrap;
   gap: 6px;
   margin-top: 10px;
+}
+
+.golden-review-card {
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+
+.golden-review-header,
+.golden-review-footer {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.golden-review-header h4 {
+  margin: 0 0 6px;
+  font-size: 0.95rem;
+}
+
+.golden-review-header p,
+.golden-review-next {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.82rem;
+  line-height: 1.5;
+}
+
+.golden-review-chip {
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(88, 166, 255, 0.35);
+  background: rgba(88, 166, 255, 0.08);
+  color: var(--accent);
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
+.golden-review-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin: 14px 0;
+}
+
+.golden-review-item {
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: rgba(13, 17, 23, 0.45);
+}
+
+.golden-review-question {
+  font-weight: 700;
+  font-size: 0.88rem;
+  margin-bottom: 8px;
+}
+
+.golden-review-answer {
+  color: var(--text);
+  font-size: 0.86rem;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.golden-review-meta,
+.golden-review-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.golden-review-status,
+.golden-review-confidence {
+  display: inline-flex;
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: rgba(110, 118, 129, 0.16);
+  color: var(--text-muted);
+  font-size: 0.74rem;
+}
+
+.btn-review-action.active {
+  border-color: rgba(46, 160, 67, 0.45);
+  background: rgba(46, 160, 67, 0.14);
+  color: #7ee787;
+}
+
+.btn-review-action.danger.active {
+  border-color: rgba(248, 81, 73, 0.45);
+  background: rgba(248, 81, 73, 0.14);
+  color: #ff7b72;
+}
+
+.golden-review-item textarea {
+  margin-top: 10px;
+  min-height: 90px;
 }
 
 .btn-file-dl {

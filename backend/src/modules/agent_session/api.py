@@ -18,13 +18,14 @@ async def stream_endpoint(
     prompt: str = "",
     session_id: str = "default",
     mode: Literal["build", "answer"] = "build",
+    build_context: str = "",
 ):
     """Stream agent events to the frontend via SSE."""
 
     if not prompt:
         return {"error": "prompt is required"}
     return StreamingResponse(
-        generate_sse(prompt, session_id, mode),
+        generate_sse(prompt, session_id, mode, build_context),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache, no-store, must-revalidate, no-transform",

@@ -2,6 +2,8 @@ import { computed, nextTick, onMounted, onUnmounted, reactive, ref } from 'vue'
 
 const API = import.meta.env.VITE_API_BASE || 'http://localhost:8000'
 const SESSION_ID = 'default'
+const DEFAULT_BUILD_PROMPT = '업로드된 문서를 바탕으로 Golden Question에 답할 수 있는 온톨로지를 구축해줘.'
+const DEFAULT_REVIEW_PROMPT = '방금 검토 피드백을 반영해서 Golden Question에 더 잘 답할 수 있도록 온톨로지를 개선해줘.'
 
 const NEO4J_TOOLS = [
   'neo4j_cypher',
@@ -19,7 +21,7 @@ const MODES = {
     key: 'build',
     label: '온톨로지 구축',
     description: '문서를 분석하고 스키마, 엔티티, 관계를 생성하는 작업 모드입니다.',
-    inputPlaceholder: '문서 기반 온톨로지 구축 작업을 요청하세요...',
+    inputPlaceholder: '추가 지시사항이 있으면 입력하세요. 비워두면 설정한 의도와 Golden Question 기준으로 바로 구축합니다.',
     allowsFiles: true,
     examples: [
       '업로드한 문서에서 엔티티를 추출해줘',
@@ -43,13 +45,47 @@ const MODES = {
 
 const MODE_KEYS = Object.keys(MODES)
 
-function createModeState() {
+function createBuildBrief() {
+  return {
+    intent: '',
+    goldenQuestions: [''],
+  }
+}
+
+function createModeState(targetMode) {
   return {
     draft: '',
     messages: [],
     todos: [],
     skills: [],
     refFiles: [],
+    buildBrief: targetMode === 'build' ? createBuildBrief() : null,
+  }
+}
+
+function normalizeGoldenQuestions(items = []) {
+  return items.map((item) => item.trim()).filter(Boolean)
+}
+
+function createReviewItem(item) {
+  return {
+    question: item.question || '',
+    answer: item.answer || '',
+    status: item.status || 'answerable',
+    confidence: item.confidence || 'medium',
+    verdict: null,
+    feedback: '',
+  }
+}
+
+function createBuildReport(report) {
+  return {
+    intent: report.intent || '',
+    summary: report.summary || '',
+    nextAction: report.next_action || report.nextAction || '',
+    goldenQuestions: Array.isArray(report.golden_questions)
+      ? report.golden_questions.map(createReviewItem)
+      : [],
   }
 }
 
@@ -57,8 +93,8 @@ export function useOntologyStudio() {
   const mode = ref('build')
   const modeOptions = Object.values(MODES)
   const modeState = reactive({
-    build: createModeState(),
-    answer: createModeState(),
+    build: createModeState('build'),
+    answer: createModeState('answer'),
   })
   const isStreaming = ref(false)
   const uploadedFiles = ref([])
@@ -85,6 +121,35 @@ export function useOntologyStudio() {
   const refFiles = computed(() => modeState[mode.value].refFiles)
   const examples = computed(() => currentModeMeta.value.examples)
   const showFilePanel = computed(() => currentModeMeta.value.allowsFiles)
+  const buildBrief = computed(() => modeState.build.buildBrief)
+  const buildIntent = computed({
+    get: () => buildBrief.value.intent,
+    set: (value) => {
+      buildBrief.value.intent = value
+    },
+  })
+  const buildGoldenQuestions = computed(() => buildBrief.value.goldenQuestions)
+  const normalizedBuildGoldenQuestions = computed(() =>
+    normalizeGoldenQuestions(buildBrief.value.goldenQuestions)
+  )
+  const isBuildBriefReady = computed(
+    () => Boolean(buildIntent.value.trim()) && normalizedBuildGoldenQuestions.value.length > 0
+  )
+  const canSend = computed(() => {
+    if (isStreaming.value) {
+      return false
+    }
+    if (mode.value === 'build') {
+      return isBuildBriefReady.value
+    }
+    return Boolean(inputText.value.trim())
+  })
+  const effectiveInputPlaceholder = computed(() => {
+    if (mode.value === 'build' && !isBuildBriefReady.value) {
+      return '먼저 구축 의도와 최소 1개의 Golden Question을 입력하세요...'
+    }
+    return currentModeMeta.value.inputPlaceholder
+  })
 
   let neo4jInterval = null
 
@@ -103,6 +168,10 @@ export function useOntologyStudio() {
     replaceItems(state.todos, [])
     replaceItems(state.skills, [])
     replaceItems(state.refFiles, [])
+    if (state.buildBrief) {
+      state.buildBrief.intent = ''
+      replaceItems(state.buildBrief.goldenQuestions, [''])
+    }
   }
 
   function isNeo4jTool(name) {
@@ -124,6 +193,86 @@ export function useOntologyStudio() {
     }
     mode.value = nextMode
     scrollBottom()
+  }
+
+  function setBuildGoldenQuestion(index, value) {
+    if (buildBrief.value.goldenQuestions[index] === undefined) {
+      return
+    }
+    buildBrief.value.goldenQuestions[index] = value
+  }
+
+  function addBuildGoldenQuestion() {
+    buildBrief.value.goldenQuestions.push('')
+  }
+
+  function removeBuildGoldenQuestion(index) {
+    if (buildBrief.value.goldenQuestions.length === 1) {
+      buildBrief.value.goldenQuestions[0] = ''
+      return
+    }
+    buildBrief.value.goldenQuestions.splice(index, 1)
+  }
+
+  function createBuildContext(reviewFeedback = []) {
+    return {
+      intent: buildIntent.value.trim(),
+      golden_questions: [...normalizedBuildGoldenQuestions.value],
+      review_feedback: reviewFeedback,
+    }
+  }
+
+  function replaceAssistantText(message, text) {
+    const nextSteps = []
+    let inserted = false
+    for (const step of message.steps) {
+      if (step.type === 'token') {
+        if (!inserted && text.trim()) {
+          nextSteps.push({ type: 'token', text })
+          inserted = true
+        }
+        continue
+      }
+      nextSteps.push(step)
+    }
+    if (!inserted && text.trim()) {
+      nextSteps.push({ type: 'token', text })
+    }
+    replaceItems(message.steps, nextSteps)
+  }
+
+  function normalizeReportFeedback(message) {
+    const report = message?.buildReport
+    if (!report) {
+      return []
+    }
+
+    return report.goldenQuestions
+      .filter((item) => item.verdict)
+      .map((item) => ({
+        question: item.question,
+        answer: item.answer,
+        status: item.status,
+        verdict: item.verdict,
+        feedback: item.feedback.trim(),
+      }))
+  }
+
+  function canSubmitBuildFeedback(message) {
+    const reviewFeedback = normalizeReportFeedback(message)
+    const incorrectItems = reviewFeedback.filter((item) => item.verdict === 'incorrect')
+    return incorrectItems.length > 0 && incorrectItems.every((item) => item.feedback)
+  }
+
+  function buildStreamUrl(prompt, currentMode, buildContext = null) {
+    const url = new URL(`${API}/api/stream`)
+    url.searchParams.set('prompt', prompt)
+    url.searchParams.set('session_id', SESSION_ID)
+    url.searchParams.set('mode', currentMode)
+    if (buildContext) {
+      url.searchParams.set('build_context', JSON.stringify(buildContext))
+    }
+    return url.toString()
   }
 
   async function checkNeo4jStatus() {
@@ -225,28 +374,23 @@ export function useOntologyStudio() {
     window.open(`${API}/api/download/${encodeURIComponent(name)}`, '_blank')
   }
 
-  async function send(textOverride = null) {
-    const currentMode = mode.value
+  function startStreamingRequest({ currentMode, prompt, userMessage, buildContext = null }) {
     const state = getModeState(currentMode)
-    const text = (textOverride ?? state.draft).trim()
-    if (!text || isStreaming.value) {
-      return
-    }
 
-    state.messages.push({ role: 'user', text, mode: currentMode })
+    state.messages.push(userMessage)
     state.draft = ''
     scrollBottom()
 
     state.messages.push({ role: 'assistant', steps: [], files: [], mode: currentMode })
     isStreaming.value = true
+
     const getAiMsg = () => {
       const currentMessages = getModeState(currentMode).messages
       return currentMessages[currentMessages.length - 1]
     }
-    let currentTokenIdx = -1
 
-    const url = `${API}/api/stream?prompt=${encodeURIComponent(text)}&session_id=${SESSION_ID}&mode=${currentMode}`
-    const es = new EventSource(url)
+    let currentTokenIdx = -1
+    const es = new EventSource(buildStreamUrl(prompt, currentMode, buildContext))
 
     es.addEventListener('token', (event) => {
       const data = JSON.parse(event.data)
@@ -311,9 +455,18 @@ export function useOntologyStudio() {
 
     es.addEventListener('done', (event) => {
       const data = JSON.parse(event.data)
-      if (data.files?.length) {
-        getAiMsg().files = data.files
+      const aiMsg = getAiMsg()
+
+      if (typeof data.text === 'string') {
+        replaceAssistantText(aiMsg, data.text)
       }
+      if (data.build_report) {
+        aiMsg.buildReport = createBuildReport(data.build_report)
+      }
+      if (data.files?.length) {
+        aiMsg.files = data.files
+      }
+
       isStreaming.value = false
       es.close()
       refreshAll()
@@ -333,6 +486,68 @@ export function useOntologyStudio() {
       es.close()
       scrollBottom()
     }
+  }
+
+  async function send(textOverride = null) {
+    const currentMode = mode.value
+    const state = getModeState(currentMode)
+    const rawText = (textOverride ?? state.draft).trim()
+
+    if (isStreaming.value) {
+      return
+    }
+
+    if (currentMode === 'build' && !isBuildBriefReady.value) {
+      return
+    }
+
+    const prompt = currentMode === 'build' ? rawText || DEFAULT_BUILD_PROMPT : rawText
+    if (!prompt) {
+      return
+    }
+
+    const userMessage =
+      currentMode === 'build'
+        ? {
+            role: 'user',
+            text: rawText || '구축 의도와 Golden Question을 기준으로 온톨로지 구축 시작',
+            mode: currentMode,
+            buildBrief: {
+              intent: buildIntent.value.trim(),
+              goldenQuestions: [...normalizedBuildGoldenQuestions.value],
+            },
+          }
+        : {
+            role: 'user',
+            text: prompt,
+            mode: currentMode,
+          }
+
+    startStreamingRequest({
+      currentMode,
+      prompt,
+      userMessage,
+      buildContext: currentMode === 'build' ? createBuildContext() : null,
+    })
+  }
+
+  async function submitBuildFeedback(message) {
+    if (isStreaming.value || !canSubmitBuildFeedback(message)) {
+      return
+    }
+
+    const reviewFeedback = normalizeReportFeedback(message)
+    startStreamingRequest({
+      currentMode: 'build',
+      prompt: DEFAULT_REVIEW_PROMPT,
+      userMessage: {
+        role: 'user',
+        text: 'Golden Question 검토 피드백 반영 요청',
+        mode: 'build',
+        buildFeedback: reviewFeedback,
+      },
+      buildContext: createBuildContext(reviewFeedback),
+    })
   }
 
   async function resetSession() {
@@ -357,10 +572,19 @@ export function useOntologyStudio() {
   })
 
   return {
+    addBuildGoldenQuestion,
+    buildGoldenQuestions,
+    buildIntent,
+    canSend,
+    canSubmitBuildFeedback,
     currentModeMeta,
+    doUploadAndNotify,
+    downloadFile,
+    effectiveInputPlaceholder,
     entityCounts,
     examples,
     inputText,
+    isBuildBriefReady,
     isNeo4jTool,
     isStreaming,
     messages,
@@ -371,15 +595,16 @@ export function useOntologyStudio() {
     panelOpen,
     refFiles,
     refreshAll,
+    removeBuildGoldenQuestion,
     resetSession,
     schema,
     send,
+    setBuildGoldenQuestion,
     setMode,
     showFilePanel,
     skills,
+    submitBuildFeedback,
     todos,
     uploadedFiles,
-    doUploadAndNotify,
-    downloadFile,
   }
 }

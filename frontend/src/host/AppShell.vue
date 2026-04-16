@@ -52,10 +52,26 @@
       </div>
     </aside>
 
-    <ChatPanel
+    <main class="workspace-main">
+      <OntologyBuildBriefPanel
+        v-if="mode === 'build'"
+        :can-start="isBuildBriefReady"
+        :golden-questions="buildGoldenQuestions"
+        :intent="buildIntent"
+        :is-streaming="isStreaming"
+        @add-question="addBuildGoldenQuestion"
+        @remove-question="removeBuildGoldenQuestion"
+        @start-build="send"
+        @update:intent="buildIntent = $event"
+        @update:question="setBuildGoldenQuestion"
+      />
+
+      <ChatPanel
+      :can-send="canSend"
+      :can-submit-build-feedback="canSubmitBuildFeedback"
       v-model:input-text="inputText"
       :examples="examples"
-      :input-placeholder="currentModeMeta.inputPlaceholder"
+      :input-placeholder="effectiveInputPlaceholder"
       :is-neo4j-tool="isNeo4jTool"
       :is-streaming="isStreaming"
       :messages="messages"
@@ -64,7 +80,9 @@
       @download="downloadFile"
       @send="send"
       @send-example="send"
-    />
+      @submit-build-feedback="submitBuildFeedback"
+      />
+    </main>
 
     <aside class="right-panel">
       <div class="right-panel-header">
@@ -96,6 +114,7 @@
 <script setup>
 import ChatPanel from '../features/chat/ChatPanel.vue'
 import FilePanel from '../features/files/FilePanel.vue'
+import OntologyBuildBriefPanel from '../features/ontology/OntologyBuildBriefPanel.vue'
 import OntologySchemaPanel from '../features/ontology/OntologySchemaPanel.vue'
 import ContextPanel from '../features/session/ContextPanel.vue'
 import TodoPanel from '../features/session/TodoPanel.vue'
@@ -103,12 +122,19 @@ import { useOntologyStudio } from '../shared/hooks/useOntologyStudio.js'
 import Neo4jStatusBadge from '../shared/ui/Neo4jStatusBadge.vue'
 
 const {
+  addBuildGoldenQuestion,
+  buildGoldenQuestions,
+  buildIntent,
+  canSend,
+  canSubmitBuildFeedback,
   currentModeMeta,
   doUploadAndNotify,
   downloadFile,
+  effectiveInputPlaceholder,
   entityCounts,
   examples,
   inputText,
+  isBuildBriefReady,
   isNeo4jTool,
   isStreaming,
   messages,
@@ -119,12 +145,15 @@ const {
   panelOpen,
   refFiles,
   refreshAll,
+  removeBuildGoldenQuestion,
   resetSession,
   schema,
   send,
+  setBuildGoldenQuestion,
   setMode,
   showFilePanel,
   skills,
+  submitBuildFeedback,
   todos,
   uploadedFiles,
 } = useOntologyStudio()
