@@ -1019,12 +1019,7 @@ body {
   font-size: 0.82rem;
   color: var(--text-muted);
   user-select: none;
-  list-style: none;
   transition: background 0.15s;
-}
-
-.tool-activity-summary::-webkit-details-marker {
-  display: none;
 }
 
 .tool-activity-summary:hover {
@@ -1052,14 +1047,13 @@ body {
   flex: 1;
 }
 
-.tool-activity-summary::after {
-  content: '▸';
+.tool-activity-chevron {
   font-size: 0.7rem;
   color: var(--text-muted);
   transition: transform 0.2s;
 }
 
-.tool-activity[open] > .tool-activity-summary::after {
+.tool-activity-chevron.open {
   transform: rotate(90deg);
 }
 

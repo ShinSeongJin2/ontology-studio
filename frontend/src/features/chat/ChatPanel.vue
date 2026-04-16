@@ -54,19 +54,22 @@
         <div v-else-if="msg.role === 'assistant'" class="msg msg-assistant">
           <div class="msg-avatar">AI</div>
           <div class="msg-body">
-            <details
-              v-if="getToolGroups(msg).length"
-              class="tool-activity"
-              :open="hasRunningTools(msg)"
-            >
-              <summary class="tool-activity-summary">
+            <div v-if="getToolGroups(msg).length" class="tool-activity">
+              <div
+                class="tool-activity-summary"
+                @click="toggleToolPanel(index)"
+              >
                 <span
                   class="tool-activity-dot"
                   :class="hasRunningTools(msg) ? 'running' : 'done'"
                 ></span>
                 <span class="tool-activity-label">{{ getToolSummaryLabel(msg) }}</span>
-              </summary>
-              <div class="tool-activity-list">
+                <span
+                  class="tool-activity-chevron"
+                  :class="{ open: isToolPanelOpen(index) }"
+                >&#9656;</span>
+              </div>
+              <div v-show="isToolPanelOpen(index)" class="tool-activity-list">
                 <div
                   v-for="(tool, ti) in getToolGroups(msg)"
                   :key="ti"
@@ -92,7 +95,7 @@
                   </details>
                 </div>
               </div>
-            </details>
+            </div>
 
             <MarkdownContent
               v-if="getTextContent(msg)"
@@ -151,6 +154,7 @@
 </template>
 
 <script setup>
+import { reactive } from 'vue'
 import GoldenQuestionReviewPanel from '../ontology/GoldenQuestionReviewPanel.vue'
 import MarkdownContent from '../../shared/ui/MarkdownContent.vue'
 
@@ -158,6 +162,8 @@ const inputText = defineModel('inputText', {
   type: String,
   default: '',
 })
+
+const toolPanelOverrides = reactive(new Map())
 
 const props = defineProps({
   examples: {
@@ -245,6 +251,26 @@ function getTextContent(msg) {
 
 function hasRunningTools(msg) {
   return msg.steps.some((s) => s.type === 'tool_start' && !s.done)
+}
+
+function isLastAssistantMessage(msgIndex) {
+  for (let i = props.messages.length - 1; i >= 0; i--) {
+    if (props.messages[i].role === 'assistant') {
+      return i === msgIndex
+    }
+  }
+  return false
+}
+
+function isToolPanelOpen(msgIndex) {
+  if (toolPanelOverrides.has(msgIndex)) {
+    return toolPanelOverrides.get(msgIndex)
+  }
+  return props.isStreaming && isLastAssistantMessage(msgIndex)
+}
+
+function toggleToolPanel(msgIndex) {
+  toolPanelOverrides.set(msgIndex, !isToolPanelOpen(msgIndex))
 }
 
 function getToolSummaryLabel(msg) {
