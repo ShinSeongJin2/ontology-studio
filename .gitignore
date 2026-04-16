@@ -39,3 +39,6 @@ test_screenshot.png
 
 # Input data
 input/
+
+# Private Datas
+AGENTS.md

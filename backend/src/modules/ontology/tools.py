@@ -1,0 +1,333 @@
+"""Neo4j-backed ontology tools and repository helpers."""
+
+from __future__ import annotations
+
+import json
+from typing import Any
+
+from neo4j import GraphDatabase
+
+from ...shared.kernel.settings import get_settings
+
+_driver = None
+
+
+def get_driver():
+    """Return a singleton Neo4j driver."""
+
+    global _driver
+    if _driver is None:
+        settings = get_settings()
+        _driver = GraphDatabase.driver(
+            settings.neo4j_uri,
+            auth=(settings.neo4j_user, settings.neo4j_password),
+        )
+    return _driver
+
+
+def _run_query(query: str, params: dict | None = None) -> list[dict]:
+    """Execute a Cypher query and return row dictionaries."""
+
+    driver = get_driver()
+    with driver.session() as session:
+        result = session.run(query, params or {})
+        return [record.data() for record in result]
+
+
+def _node_to_dict(node) -> dict:
+    """Convert a Neo4j node into a serializable dictionary."""
+
+    if node is None:
+        return {}
+    return {"id": node.element_id, "labels": list(node.labels), **dict(node)}
+
+
+def neo4j_cypher(query: str, params: str = "{}") -> str:
+    """Execute an arbitrary Cypher query against Neo4j."""
+
+    try:
+        parsed_params = json.loads(params) if params else {}
+        rows = _run_query(query, parsed_params)
+        serialized = []
+        for row in rows:
+            serialized_row = {}
+            for key, value in row.items():
+                if hasattr(value, "element_id"):
+                    serialized_row[key] = _node_to_dict(value)
+                elif hasattr(value, "type"):
+                    serialized_row[key] = {"type": value.type, **dict(value)}
+                else:
+                    serialized_row[key] = value
+            serialized.append(serialized_row)
+        return json.dumps(serialized, ensure_ascii=False, default=str)
+    except Exception as exc:  # pragma: no cover - passthrough error handling
+        return json.dumps({"error": str(exc)}, ensure_ascii=False)
+
+
+def schema_create_class(
+    name: str,
+    description: str = "",
+    properties: str = "[]",
+) -> str:
+    """Create or update an ontology class."""
+
+    try:
+        props = json.loads(properties) if properties else []
+        rows = _run_query(
+            """
+            MERGE (c:_OntologyClass {name: $name})
+            SET c.description = $description,
+                c.properties = $properties,
+                c.updated_at = datetime()
+            RETURN c
+            """,
+            {
+                "name": name,
+                "description": description,
+                "properties": json.dumps(props, ensure_ascii=False),
+            },
+        )
+        if rows:
+            node = rows[0]["c"]
+            return json.dumps(
+                {"status": "ok", "class": _node_to_dict(node)},
+                ensure_ascii=False,
+                default=str,
+            )
+        return json.dumps({"status": "ok", "class": name}, ensure_ascii=False)
+    except Exception as exc:  # pragma: no cover - passthrough error handling
+        return json.dumps({"error": str(exc)}, ensure_ascii=False)
+
+
+def schema_create_relationship_type(
+    name: str,
+    from_class: str,
+    to_class: str,
+    description: str = "",
+    properties: str = "[]",
+) -> str:
+    """Define an ontology relationship type."""
+
+    try:
+        props = json.loads(properties) if properties else []
+        rows = _run_query(
+            """
+            MATCH (from_c:_OntologyClass {name: $from_class})
+            MATCH (to_c:_OntologyClass {name: $to_class})
+            MERGE (r:_OntologyRelationshipType {name: $name})
+            SET r.description = $description,
+                r.from_class = $from_class,
+                r.to_class = $to_class,
+                r.properties = $properties,
+                r.updated_at = datetime()
+            MERGE (r)-[:FROM_CLASS]->(from_c)
+            MERGE (r)-[:TO_CLASS]->(to_c)
+            RETURN r
+            """,
+            {
+                "name": name,
+                "from_class": from_class,
+                "to_class": to_class,
+                "description": description,
+                "properties": json.dumps(props, ensure_ascii=False),
+            },
+        )
+        if rows:
+            node = rows[0]["r"]
+            return json.dumps(
+                {"status": "ok", "relationship_type": _node_to_dict(node)},
+                ensure_ascii=False,
+                default=str,
+            )
+        return json.dumps(
+            {
+                "error": (
+                    f"클래스 '{from_class}' 또는 '{to_class}'를 찾을 수 없습니다. "
+                    "먼저 schema_create_class로 클래스를 생성하세요."
+                )
+            },
+            ensure_ascii=False,
+        )
+    except Exception as exc:  # pragma: no cover - passthrough error handling
+        return json.dumps({"error": str(exc)}, ensure_ascii=False)
+
+
+def schema_get() -> str:
+    """Return the full ontology schema."""
+
+    try:
+        classes = _run_query("MATCH (c:_OntologyClass) RETURN c ORDER BY c.name")
+        relationships = _run_query(
+            """
+            MATCH (r:_OntologyRelationshipType)
+            OPTIONAL MATCH (r)-[:FROM_CLASS]->(fc:_OntologyClass)
+            OPTIONAL MATCH (r)-[:TO_CLASS]->(tc:_OntologyClass)
+            RETURN r, fc.name AS from_class, tc.name AS to_class
+            ORDER BY r.name
+            """
+        )
+
+        schema_classes = []
+        for row in classes:
+            node = row["c"]
+            node_dict = _node_to_dict(node) if hasattr(node, "element_id") else node
+            raw_props = node_dict.get("properties", "[]")
+            try:
+                props = json.loads(raw_props) if isinstance(raw_props, str) else raw_props
+            except (json.JSONDecodeError, TypeError):
+                props = []
+            schema_classes.append(
+                {
+                    "name": node_dict.get("name", ""),
+                    "description": node_dict.get("description", ""),
+                    "properties": props,
+                }
+            )
+
+        schema_relationships = []
+        for row in relationships:
+            node = row["r"]
+            node_dict = _node_to_dict(node) if hasattr(node, "element_id") else node
+            raw_props = node_dict.get("properties", "[]")
+            try:
+                props = json.loads(raw_props) if isinstance(raw_props, str) else raw_props
+            except (json.JSONDecodeError, TypeError):
+                props = []
+            schema_relationships.append(
+                {
+                    "name": node_dict.get("name", ""),
+                    "from_class": row.get("from_class") or node_dict.get("from_class", ""),
+                    "to_class": row.get("to_class") or node_dict.get("to_class", ""),
+                    "description": node_dict.get("description", ""),
+                    "properties": props,
+                }
+            )
+
+        return json.dumps(
+            {
+                "classes": schema_classes,
+                "relationships": schema_relationships,
+            },
+            ensure_ascii=False,
+            default=str,
+        )
+    except Exception as exc:  # pragma: no cover - passthrough error handling
+        return json.dumps(
+            {"classes": [], "relationships": [], "error": str(exc)},
+            ensure_ascii=False,
+        )
+
+
+def entity_search(class_name: str, search_criteria: str) -> str:
+    """Search existing entities by class and property filters."""
+
+    try:
+        criteria = json.loads(search_criteria) if search_criteria else {}
+        if not criteria:
+            return json.dumps([], ensure_ascii=False)
+
+        conditions = [f"n.{key} = ${key}" for key in criteria]
+        query = f"""
+        MATCH (n:_Entity:{class_name})
+        WHERE {' AND '.join(conditions)}
+        RETURN n
+        LIMIT 10
+        """
+        rows = _run_query(query, criteria)
+        entities = []
+        for row in rows:
+            node = row["n"]
+            entities.append(_node_to_dict(node))
+        return json.dumps(entities, ensure_ascii=False, default=str)
+    except Exception as exc:  # pragma: no cover - passthrough error handling
+        return json.dumps({"error": str(exc)}, ensure_ascii=False)
+
+
+def entity_create(
+    class_name: str,
+    properties: str,
+    match_keys: str = "[]",
+) -> str:
+    """Create or merge an entity instance."""
+
+    try:
+        props = json.loads(properties) if properties else {}
+        keys = json.loads(match_keys) if match_keys else []
+
+        merge_props = {key: props.get(key) for key in keys if key in props}
+        if not merge_props:
+            return json.dumps(
+                {
+                    "error": "match_keys에 해당하는 속성이 없습니다. "
+                    "중복 방지를 위해 최소 1개 이상의 키를 지정하세요."
+                },
+                ensure_ascii=False,
+            )
+
+        set_clause = ", ".join(f"n.{key} = ${key}" for key in props.keys())
+        merge_clause = ", ".join(f"{key}: $merge_{key}" for key in merge_props.keys())
+
+        query = f"""
+        MERGE (n:_Entity:{class_name} {{ {merge_clause} }})
+        SET {set_clause},
+            n.updated_at = datetime()
+        ON CREATE SET n.created_at = datetime()
+        RETURN n
+        """
+
+        params: dict[str, Any] = dict(props)
+        params.update({f"merge_{key}": value for key, value in merge_props.items()})
+
+        rows = _run_query(query, params)
+        if rows:
+            node = rows[0]["n"]
+            return json.dumps(
+                {"status": "ok", "entity": _node_to_dict(node)},
+                ensure_ascii=False,
+                default=str,
+            )
+        return json.dumps({"status": "ok"}, ensure_ascii=False)
+    except Exception as exc:  # pragma: no cover - passthrough error handling
+        return json.dumps({"error": str(exc)}, ensure_ascii=False)
+
+
+def relationship_create(
+    from_entity_id: str,
+    to_entity_id: str,
+    relationship_type: str,
+    properties: str = "{}",
+) -> str:
+    """Create a relationship between two entities."""
+
+    try:
+        props = json.loads(properties) if properties else {}
+        set_props = ""
+        if props:
+            assignments = [f"r.{key} = ${key}" for key in props.keys()]
+            set_props = ", " + ", ".join(assignments)
+
+        query = f"""
+        MATCH (from_n:_Entity) WHERE elementId(from_n) = $from_entity_id
+        MATCH (to_n:_Entity) WHERE elementId(to_n) = $to_entity_id
+        MERGE (from_n)-[r:{relationship_type}]->(to_n)
+        SET r.updated_at = datetime(){set_props}
+        ON CREATE SET r.created_at = datetime()
+        RETURN from_n, r, to_n
+        """
+        params = {
+            "from_entity_id": from_entity_id,
+            "to_entity_id": to_entity_id,
+            **props,
+        }
+
+        rows = _run_query(query, params)
+        if rows:
+            rel = rows[0]["r"]
+            return json.dumps(
+                {"status": "ok", "relationship": {"type": rel.type, **dict(rel)}},
+                ensure_ascii=False,
+                default=str,
+            )
+        return json.dumps({"status": "ok"}, ensure_ascii=False)
+    except Exception as exc:  # pragma: no cover - passthrough error handling
+        return json.dumps({"error": str(exc)}, ensure_ascii=False)

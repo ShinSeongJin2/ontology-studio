@@ -1,9 +1,4 @@
-"""Docker 기반 샌드박스 백엔드.
-
-BaseSandbox를 확장하여 Docker 컨테이너 내에서 명령을 실행합니다.
-에이전트의 execute 도구가 Docker 컨테이너 안에서 동작하므로,
-openpyxl 코드 실행 및 recalc.py 스크립트 호출이 자동으로 이루어집니다.
-"""
+"""Docker-backed sandbox implementation for DeepAgents."""
 
 from __future__ import annotations
 
@@ -19,7 +14,7 @@ from deepagents.backends.sandbox import BaseSandbox
 
 
 class DockerSandboxBackend(BaseSandbox):
-    """Docker 컨테이너에서 명령을 실행하는 샌드박스 백엔드."""
+    """Execute sandbox commands inside a named Docker container."""
 
     def __init__(
         self,
@@ -46,10 +41,14 @@ class DockerSandboxBackend(BaseSandbox):
         try:
             result = subprocess.run(
                 [
-                    "docker", "exec",
-                    "-w", self._workdir,
+                    "docker",
+                    "exec",
+                    "-w",
+                    self._workdir,
                     self._container_name,
-                    "bash", "-c", command,
+                    "bash",
+                    "-c",
+                    command,
                 ],
                 capture_output=True,
                 text=True,
@@ -67,9 +66,9 @@ class DockerSandboxBackend(BaseSandbox):
                 exit_code=124,
                 truncated=True,
             )
-        except Exception as e:
+        except Exception as exc:  # pragma: no cover - passthrough error handling
             return ExecuteResponse(
-                output=str(e),
+                output=str(exc),
                 exit_code=1,
                 truncated=False,
             )
@@ -85,13 +84,13 @@ class DockerSandboxBackend(BaseSandbox):
                     timeout=30,
                 )
                 if proc.returncode != 0:
-                    # Fallback: write via execute
                     import base64
+
                     b64 = base64.b64encode(content).decode()
                     self.execute(f"echo '{b64}' | base64 -d > {path}")
                 results.append(FileUploadResponse(path=path, error=None))
-            except Exception as e:
-                results.append(FileUploadResponse(path=path, error=str(e)))
+            except Exception as exc:  # pragma: no cover - passthrough error handling
+                results.append(FileUploadResponse(path=path, error=str(exc)))
         return results
 
     def download_files(self, paths: list[str]) -> list[FileDownloadResponse]:
@@ -104,13 +103,19 @@ class DockerSandboxBackend(BaseSandbox):
                     timeout=30,
                 )
                 if proc.returncode == 0:
-                    results.append(FileDownloadResponse(path=path, content=proc.stdout, error=None))
+                    results.append(
+                        FileDownloadResponse(path=path, content=proc.stdout, error=None)
+                    )
                 else:
-                    # Fallback: read via execute and base64
-                    resp = self.execute(f"base64 {path}")
                     import base64
+
+                    resp = self.execute(f"base64 {path}")
                     content = base64.b64decode(resp.output.strip())
-                    results.append(FileDownloadResponse(path=path, content=content, error=None))
-            except Exception as e:
-                results.append(FileDownloadResponse(path=path, content=b"", error=str(e)))
+                    results.append(
+                        FileDownloadResponse(path=path, content=content, error=None)
+                    )
+            except Exception as exc:  # pragma: no cover - passthrough error handling
+                results.append(
+                    FileDownloadResponse(path=path, content=b"", error=str(exc))
+                )
         return results

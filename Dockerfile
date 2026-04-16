@@ -11,8 +11,8 @@ RUN pip install --no-cache-dir openpyxl pandas pdfplumber python-docx
 # 작업 디렉토리 설정
 WORKDIR /workspace
 
-# 스킬 스크립트 복사
-COPY skills/ /workspace/skills/
+# 백엔드 스킬 스크립트 복사
+COPY backend/skills/ /workspace/skills/
 
 # 컨테이너가 계속 실행되도록
 CMD ["sleep", "infinity"]
