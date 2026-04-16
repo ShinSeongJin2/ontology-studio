@@ -207,15 +207,29 @@ def schema_get() -> str:
     """Return the full ontology schema."""
 
     try:
-        classes = _run_query("MATCH (c:_OntologyClass) RETURN c ORDER BY c.name")
-        relationships = _run_query(
+        classes = _run_readonly_query(
             """
-            MATCH (r:_OntologyRelationshipType)
-            OPTIONAL MATCH (r)-[:FROM_CLASS]->(fc:_OntologyClass)
-            OPTIONAL MATCH (r)-[:TO_CLASS]->(tc:_OntologyClass)
-            RETURN r, fc.name AS from_class, tc.name AS to_class
-            ORDER BY r.name
+            MATCH (c)
+            WHERE $class_label IN labels(c)
+            RETURN c
+            """,
+            {"class_label": "_OntologyClass"},
+        )
+        relationships = _run_readonly_query(
             """
+            MATCH (r)
+            WHERE $relationship_label IN labels(r)
+            OPTIONAL MATCH (r)-[from_rel]->(fc)
+            WHERE type(from_rel) = $from_rel_type
+            OPTIONAL MATCH (r)-[to_rel]->(tc)
+            WHERE type(to_rel) = $to_rel_type
+            RETURN r, fc, tc
+            """,
+            {
+                "relationship_label": "_OntologyRelationshipType",
+                "from_rel_type": "FROM_CLASS",
+                "to_rel_type": "TO_CLASS",
+            },
         )
 
         schema_classes = []
@@ -234,11 +248,20 @@ def schema_get() -> str:
                     "properties": props,
                 }
             )
+        schema_classes.sort(key=lambda item: item["name"])
 
         schema_relationships = []
         for row in relationships:
             node = row["r"]
             node_dict = _node_to_dict(node) if hasattr(node, "element_id") else node
+            from_node = row.get("fc")
+            from_node_dict = (
+                _node_to_dict(from_node) if hasattr(from_node, "element_id") else from_node or {}
+            )
+            to_node = row.get("tc")
+            to_node_dict = (
+                _node_to_dict(to_node) if hasattr(to_node, "element_id") else to_node or {}
+            )
             raw_props = node_dict.get("properties", "[]")
             try:
                 props = json.loads(raw_props) if isinstance(raw_props, str) else raw_props
@@ -247,12 +270,13 @@ def schema_get() -> str:
             schema_relationships.append(
                 {
                     "name": node_dict.get("name", ""),
-                    "from_class": row.get("from_class") or node_dict.get("from_class", ""),
-                    "to_class": row.get("to_class") or node_dict.get("to_class", ""),
+                    "from_class": from_node_dict.get("name") or node_dict.get("from_class", ""),
+                    "to_class": to_node_dict.get("name") or node_dict.get("to_class", ""),
                     "description": node_dict.get("description", ""),
                     "properties": props,
                 }
             )
+        schema_relationships.sort(key=lambda item: item["name"])
 
         return json.dumps(
             {
