@@ -35,12 +35,12 @@ def get_settings() -> Settings:
     return Settings(
         container_name=os.environ.get("CONTAINER_NAME", "deepagents-sandbox"),
         sandbox_workdir=os.environ.get("SANDBOX_WORKDIR", "/workspace"),
-        openai_model=os.environ.get("OPENAI_MODEL", "openai:gpt-5"),
+        openai_model=os.environ.get("OPENAI_MODEL", "openai:gpt-5.4-2026-03-05"),
         openai_base_url=os.environ.get("OPENAI_BASE_URL", ""),
         openai_api_key=os.environ.get("OPENAI_API_KEY", ""),
         backend_host=os.environ.get("BACKEND_HOST", "0.0.0.0"),
         backend_port=int(os.environ.get("BACKEND_PORT", "8000")),
         neo4j_uri=os.environ.get("NEO4J_URI", "bolt://localhost:7687"),
         neo4j_user=os.environ.get("NEO4J_USER", "neo4j"),
-        neo4j_password=os.environ.get("NEO4J_PASSWORD", "12345678"),
+        neo4j_password=os.environ.get("NEO4J_PASSWORD", ""),
     )

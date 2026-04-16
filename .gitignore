@@ -42,4 +42,5 @@ test_screenshot.png
 input/
 
 # Private Datas
+p_*
 AGENTS.md
