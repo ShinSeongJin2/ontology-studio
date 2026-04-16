@@ -72,7 +72,7 @@
     <div class="build-brief-action-bar">
       <div class="build-brief-action-inner">
         <p v-if="!canStart" class="build-brief-hint">
-          의도 1개와 Golden Question 최소 1개를 입력하면 구축을 시작할 수 있습니다.
+          파일 1개 이상 업로드, 의도 1개, Golden Question 최소 1개를 입력하면 구축을 시작할 수 있습니다.
         </p>
         <button
           class="btn-build-start"

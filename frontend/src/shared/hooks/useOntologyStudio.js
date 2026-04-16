@@ -133,7 +133,10 @@ export function useOntologyStudio() {
     normalizeGoldenQuestions(buildBrief.value.goldenQuestions)
   )
   const isBuildBriefReady = computed(
-    () => Boolean(buildIntent.value.trim()) && normalizedBuildGoldenQuestions.value.length > 0
+    () =>
+      Boolean(buildIntent.value.trim()) &&
+      normalizedBuildGoldenQuestions.value.length > 0 &&
+      uploadedFiles.value.length > 0
   )
   const canSend = computed(() => {
     if (isStreaming.value) {
@@ -146,7 +149,7 @@ export function useOntologyStudio() {
   })
   const effectiveInputPlaceholder = computed(() => {
     if (mode.value === 'build' && !isBuildBriefReady.value) {
-      return '먼저 구축 의도와 최소 1개의 Golden Question을 입력하세요...'
+      return '먼저 파일을 업로드하고, 구축 의도와 최소 1개의 Golden Question을 입력하세요...'
     }
     return currentModeMeta.value.inputPlaceholder
   })
