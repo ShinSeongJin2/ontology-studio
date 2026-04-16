@@ -6,6 +6,9 @@ import asyncio
 import json
 import re
 import threading
+import time
+import traceback
+import uuid
 from pathlib import Path
 from typing import Any, Literal
 
@@ -22,6 +25,7 @@ from ..ontology.tools import (
     schema_create_relationship_type,
     schema_get,
 )
+from ...shared.logging import log_agent_event
 from ...shared.kernel.settings import get_settings
 from ...shared.sandbox.docker_backend import DockerSandboxBackend
 
@@ -144,6 +148,80 @@ _BUILD_REPORT_PATTERN = re.compile(
     re.DOTALL,
 )
 _TEXT_CONTENT_BLOCK_TYPES = {"text", "output_text"}
+
+
+def _parse_json_if_possible(value: str) -> Any | None:
+    """Best-effort JSON parsing for tool outputs."""
+
+    normalized = value.strip()
+    if not normalized or normalized[0] not in "{[":
+        return None
+    try:
+        return json.loads(normalized)
+    except json.JSONDecodeError:
+        return None
+
+
+def _detect_tool_failure(content: str) -> str | None:
+    """Infer likely tool failures from raw tool output."""
+
+    parsed = _parse_json_if_possible(content)
+    if isinstance(parsed, dict):
+        error_value = parsed.get("error")
+        if error_value:
+            return _clean_text(error_value)
+        exit_code = parsed.get("exit_code")
+        if isinstance(exit_code, int) and exit_code != 0:
+            return f"exit_code={exit_code}"
+        status_value = _clean_text(parsed.get("status")).lower()
+        if status_value in {"error", "failed", "failure", "timeout"}:
+            return _clean_text(parsed.get("message")) or status_value
+
+    exit_code_match = re.search(r"\bexit[_ ]code\b[^0-9-]*(-?\d+)", content, re.IGNORECASE)
+    if exit_code_match:
+        exit_code = int(exit_code_match.group(1))
+        if exit_code != 0:
+            return f"exit_code={exit_code}"
+
+    lowered = content.lower()
+    if "traceback" in lowered:
+        return "traceback_detected"
+    if "timed out" in lowered:
+        return "timeout_detected"
+    return None
+
+
+def _summarize_tool_runs(tool_runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Aggregate tool calls by tool name for end-of-run summaries."""
+
+    aggregated: dict[str, dict[str, Any]] = {}
+    for tool_run in tool_runs:
+        tool_name = _clean_text(tool_run.get("name")) or "unknown"
+        current = aggregated.setdefault(
+            tool_name,
+            {
+                "name": tool_name,
+                "count": 0,
+                "failure_count": 0,
+                "total_duration_ms": 0,
+                "max_duration_ms": 0,
+            },
+        )
+        current["count"] += 1
+        if tool_run.get("failed"):
+            current["failure_count"] += 1
+        duration_ms = tool_run.get("duration_ms")
+        if isinstance(duration_ms, int):
+            current["total_duration_ms"] += duration_ms
+            current["max_duration_ms"] = max(current["max_duration_ms"], duration_ms)
+
+    summaries = []
+    for item in aggregated.values():
+        count = item["count"] or 1
+        item["avg_duration_ms"] = int(item["total_duration_ms"] / count)
+        summaries.append(item)
+    summaries.sort(key=lambda item: item["name"])
+    return summaries
 
 
 def _clean_text(value: Any) -> str:
@@ -515,6 +593,7 @@ def _run_agent_in_thread(
     prompt: str,
     session_id: str,
     mode: AgentMode,
+    run_id: str,
     queue: asyncio.Queue,
     loop: asyncio.AbstractEventLoop,
 ) -> None:
@@ -526,18 +605,45 @@ def _run_agent_in_thread(
         if history_key not in _sessions:
             _sessions[history_key] = []
         history = _sessions[history_key]
+        history_length_before = len(history)
         history.append(HumanMessage(content=prompt))
 
         settings = get_settings()
         stream_modes = ["messages", "updates"] if not settings.openai_base_url else ["updates"]
+        log_agent_event(
+            "INFO",
+            "agent_stream_thread_started",
+            run_id=run_id,
+            session_id=session_id,
+            mode=mode,
+            history_length_before=history_length_before,
+            history_length_after=len(history),
+            stream_modes=stream_modes,
+        )
         for event_mode, payload in agent.stream(
             {"messages": list(history)},
             stream_mode=stream_modes,
         ):
             loop.call_soon_threadsafe(queue.put_nowait, (event_mode, payload))
     except Exception as exc:  # pragma: no cover - passthrough error handling
+        log_agent_event(
+            "ERROR",
+            "agent_stream_thread_error",
+            run_id=run_id,
+            session_id=session_id,
+            mode=mode,
+            error=str(exc),
+            traceback=traceback.format_exc(),
+        )
         loop.call_soon_threadsafe(queue.put_nowait, ("__error__", str(exc)))
     finally:
+        log_agent_event(
+            "INFO",
+            "agent_stream_thread_finished",
+            run_id=run_id,
+            session_id=session_id,
+            mode=mode,
+        )
         loop.call_soon_threadsafe(queue.put_nowait, _SENTINEL)
 
 
@@ -553,11 +659,31 @@ async def generate_sse(
     effective_prompt = (
         _compose_build_prompt(prompt, build_context) if mode == "build" else prompt
     )
+    settings = get_settings()
+    stream_modes = ["messages", "updates"] if not settings.openai_base_url else ["updates"]
+    run_id = uuid.uuid4().hex
+    run_started_at = time.perf_counter()
     queue: asyncio.Queue = asyncio.Queue()
     loop = asyncio.get_running_loop()
+    log_agent_event(
+        "INFO",
+        "agent_run_started",
+        run_id=run_id,
+        session_id=session_id,
+        mode=mode,
+        user_prompt=prompt,
+        raw_build_context=raw_build_context if mode == "build" else None,
+        parsed_build_context=build_context if mode == "build" else None,
+        effective_prompt=effective_prompt,
+        model_name=settings.openai_model,
+        using_custom_base_url=bool(settings.openai_base_url),
+        sandbox_container_name=settings.container_name,
+        sandbox_workdir=settings.sandbox_workdir,
+        stream_modes=stream_modes,
+    )
     thread = threading.Thread(
         target=_run_agent_in_thread,
-        args=(effective_prompt, session_id, mode, queue, loop),
+        args=(effective_prompt, session_id, mode, run_id, queue, loop),
         daemon=True,
     )
     thread.start()
@@ -577,7 +703,123 @@ async def generate_sse(
     pending_tool_names: dict[str, str] = {}
     emitted_tool_starts: set[str] = set()
     emitted_tool_results: set[str] = set()
+    tool_started_at: dict[str, float] = {}
+    tool_runs: list[dict[str, Any]] = []
+    tool_runs_by_id: dict[str, dict[str, Any]] = {}
+    node_update_counts: dict[str, int] = {}
+    stream_event_counts = {"messages": 0, "updates": 0}
+    last_logged_node = ""
+    run_failed = False
+    error_message = ""
     assistant_text = ""
+
+    def _register_tool_start(
+        tool_call_id: str,
+        tool_name: str,
+        node: str,
+        tool_call: Any,
+    ) -> bool:
+        if tool_call_id and tool_call_id in emitted_tool_starts:
+            return False
+        if tool_call_id:
+            emitted_tool_starts.add(tool_call_id)
+            tool_started_at[tool_call_id] = time.perf_counter()
+
+        tool_run = {
+            "tool_call_id": tool_call_id,
+            "name": tool_name,
+            "node": node,
+            "started_at_ms": int(time.time() * 1000),
+            "duration_ms": None,
+            "failed": False,
+        }
+        tool_runs.append(tool_run)
+        if tool_call_id:
+            tool_runs_by_id[tool_call_id] = tool_run
+
+        log_agent_event(
+            "INFO",
+            "tool_start",
+            run_id=run_id,
+            session_id=session_id,
+            mode=mode,
+            tool_call_id=tool_call_id,
+            tool_name=tool_name,
+            node=node,
+            tool_call=tool_call,
+        )
+        return True
+
+    def _register_tool_result(
+        tool_call_id: str,
+        tool_name: str,
+        content: str,
+        node: str,
+    ) -> bool:
+        if tool_call_id and tool_call_id in emitted_tool_results:
+            return False
+        if tool_call_id:
+            emitted_tool_results.add(tool_call_id)
+
+        duration_ms = None
+        if tool_call_id and tool_call_id in tool_started_at:
+            duration_ms = int((time.perf_counter() - tool_started_at.pop(tool_call_id)) * 1000)
+
+        failure_reason = _detect_tool_failure(content)
+        tool_run = tool_runs_by_id.get(tool_call_id)
+        if tool_run is None:
+            tool_run = {
+                "tool_call_id": tool_call_id,
+                "name": tool_name,
+                "node": node,
+                "started_at_ms": None,
+                "duration_ms": None,
+                "failed": False,
+            }
+            tool_runs.append(tool_run)
+            if tool_call_id:
+                tool_runs_by_id[tool_call_id] = tool_run
+
+        tool_run["name"] = tool_name or tool_run.get("name", "")
+        tool_run["node"] = node or tool_run.get("node", "")
+        tool_run["duration_ms"] = duration_ms
+        tool_run["completed_at_ms"] = int(time.time() * 1000)
+        tool_run["failed"] = failure_reason is not None
+        if failure_reason:
+            tool_run["failure_reason"] = failure_reason
+
+        log_agent_event(
+            "ERROR" if failure_reason else "INFO",
+            "tool_result",
+            run_id=run_id,
+            session_id=session_id,
+            mode=mode,
+            tool_call_id=tool_call_id,
+            tool_name=tool_name,
+            node=node,
+            duration_ms=duration_ms,
+            failed=failure_reason is not None,
+            failure_reason=failure_reason,
+            content=content,
+        )
+        return True
+
+    def _record_node_update(node_name: str) -> None:
+        nonlocal last_logged_node
+        if not node_name:
+            return
+        node_update_counts[node_name] = node_update_counts.get(node_name, 0) + 1
+        if node_name != last_logged_node:
+            last_logged_node = node_name
+            log_agent_event(
+                "INFO",
+                "node_update",
+                run_id=run_id,
+                session_id=session_id,
+                mode=mode,
+                node=node_name,
+                update_count=node_update_counts[node_name],
+            )
 
     while True:
         item = await queue.get()
@@ -586,12 +828,25 @@ async def generate_sse(
 
         event_mode, payload = item
         if event_mode == "__error__":
+            run_failed = True
+            error_message = str(payload)
+            log_agent_event(
+                "ERROR",
+                "agent_run_error_event",
+                run_id=run_id,
+                session_id=session_id,
+                mode=mode,
+                error=error_message,
+                elapsed_ms=int((time.perf_counter() - run_started_at) * 1000),
+            )
             yield _format_sse("error_event", {"message": str(payload)})
             break
 
         if event_mode == "messages":
+            stream_event_counts["messages"] += 1
             msg_chunk, metadata = payload
             node = metadata.get("langgraph_node", "")
+            _record_node_update(node)
 
             if isinstance(msg_chunk, AIMessageChunk):
                 text = _extract_text_from_content(msg_chunk.content)
@@ -604,16 +859,20 @@ async def generate_sse(
                         tool_call_id = tool_call.get("id") or str(tool_call.get("index", ""))
                         if tool_call_id and tool_call.get("name"):
                             pending_tool_names[tool_call_id] = tool_call["name"]
-                            if tool_call_id not in emitted_tool_starts:
-                                emitted_tool_starts.add(tool_call_id)
-                                yield _format_sse(
-                                    "tool_start",
-                                    {
-                                        "tool_call_id": tool_call_id,
-                                        "name": tool_call["name"],
-                                        "node": node,
-                                    },
-                                )
+                        if tool_call.get("name") and _register_tool_start(
+                            tool_call_id,
+                            tool_call["name"],
+                            node,
+                            tool_call,
+                        ):
+                            yield _format_sse(
+                                "tool_start",
+                                {
+                                    "tool_call_id": tool_call_id,
+                                    "name": tool_call["name"],
+                                    "node": node,
+                                },
+                            )
 
             elif isinstance(msg_chunk, ToolMessage):
                 content = msg_chunk.content if isinstance(msg_chunk.content, str) else str(msg_chunk.content)
@@ -625,10 +884,7 @@ async def generate_sse(
                     seen_refs,
                 ):
                     yield event
-                result_key = msg_chunk.tool_call_id or ""
-                if not result_key or result_key not in emitted_tool_results:
-                    if result_key:
-                        emitted_tool_results.add(result_key)
+                if _register_tool_result(msg_chunk.tool_call_id or "", tool_name, content, node):
                     yield _format_sse(
                         "tool_result",
                         {
@@ -640,9 +896,11 @@ async def generate_sse(
                     )
 
         elif event_mode == "updates":
+            stream_event_counts["updates"] += 1
             for node_name, node_data in payload.items():
                 if node_name.startswith("__"):
                     continue
+                _record_node_update(node_name)
 
                 if "SkillsMiddleware" in node_name and node_name not in seen_skills:
                     seen_skills.add(node_name)
@@ -669,9 +927,12 @@ async def generate_sse(
                                     tool_name = tool_call.get("name", "")
                                     tool_call_id = tool_call.get("id", "")
                                     pending_tool_names[tool_call_id] = tool_name
-                                    if not tool_call_id or tool_call_id not in emitted_tool_starts:
-                                        if tool_call_id:
-                                            emitted_tool_starts.add(tool_call_id)
+                                    if _register_tool_start(
+                                        tool_call_id,
+                                        tool_name,
+                                        node_name,
+                                        tool_call,
+                                    ):
                                         yield _format_sse(
                                             "tool_start",
                                             {
@@ -694,10 +955,12 @@ async def generate_sse(
                                 seen_refs,
                             ):
                                 yield event
-                            result_key = message.tool_call_id or ""
-                            if not result_key or result_key not in emitted_tool_results:
-                                if result_key:
-                                    emitted_tool_results.add(result_key)
+                            if _register_tool_result(
+                                message.tool_call_id or "",
+                                tool_name,
+                                content,
+                                node_name,
+                            ):
                                 yield _format_sse(
                                     "tool_result",
                                     {
@@ -716,6 +979,58 @@ async def generate_sse(
     if mode == "build":
         final_text, build_report = _extract_build_report(final_text, build_context)
 
+    total_elapsed_ms = int((time.perf_counter() - run_started_at) * 1000)
+    completed_tool_runs = [
+        tool_run for tool_run in tool_runs if tool_run.get("completed_at_ms") is not None
+    ]
+    unfinished_tool_runs = [
+        tool_run for tool_run in tool_runs if tool_run.get("completed_at_ms") is None
+    ]
+    tool_failure_count = sum(1 for tool_run in tool_runs if tool_run.get("failed"))
+    total_tool_duration_ms = sum(
+        tool_run["duration_ms"]
+        for tool_run in tool_runs
+        if isinstance(tool_run.get("duration_ms"), int)
+    )
+    log_agent_event(
+        "ERROR" if run_failed else "INFO",
+        "agent_run_finished",
+        run_id=run_id,
+        session_id=session_id,
+        mode=mode,
+        elapsed_ms=total_elapsed_ms,
+        failed=run_failed,
+        error=error_message or None,
+        final_text=final_text,
+        build_report=build_report,
+    )
+    log_agent_event(
+        "ERROR" if run_failed or tool_failure_count else "INFO",
+        "agent_run_summary",
+        run_id=run_id,
+        session_id=session_id,
+        mode=mode,
+        elapsed_ms=total_elapsed_ms,
+        failed=run_failed,
+        error=error_message or None,
+        user_prompt=prompt,
+        effective_prompt=effective_prompt,
+        build_context=build_context if mode == "build" else None,
+        generated_files=all_files,
+        referenced_uploads=sorted(seen_refs),
+        loaded_skills=sorted(seen_skills),
+        stream_event_counts=stream_event_counts,
+        node_update_counts=node_update_counts,
+        tool_count=len(tool_runs),
+        completed_tool_count=len(completed_tool_runs),
+        unfinished_tool_count=len(unfinished_tool_runs),
+        tool_failure_count=tool_failure_count,
+        total_tool_duration_ms=total_tool_duration_ms,
+        tool_runs=tool_runs,
+        tool_summary=_summarize_tool_runs(tool_runs),
+        final_text=final_text,
+        build_report=build_report,
+    )
     yield _format_sse(
         "done",
         {
