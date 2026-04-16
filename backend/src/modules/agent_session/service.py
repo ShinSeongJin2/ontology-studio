@@ -72,18 +72,38 @@ _NEO4J_TOOL_NAMES = {
 }
 
 
+def _normalize_openai_model_name(model_name: str) -> str:
+    """Convert provider-prefixed OpenAI model identifiers to bare model names."""
+
+    if model_name.startswith("openai:"):
+        return model_name.split(":", maxsplit=1)[1]
+    return model_name
+
+
+def _should_use_responses_api(model_name: str, base_url: str) -> bool:
+    """Use Responses API for official OpenAI GPT-5 models."""
+
+    normalized_model = _normalize_openai_model_name(model_name)
+    return not base_url and normalized_model.startswith("gpt-5")
+
+
 def _init_model():
     """Create the configured model instance or provider string."""
 
     settings = get_settings()
-    if settings.openai_base_url:
+    if settings.openai_base_url or settings.openai_model.startswith("openai:"):
         from langchain_openai import ChatOpenAI
 
         return ChatOpenAI(
-            model=settings.openai_model,
+            model=_normalize_openai_model_name(settings.openai_model),
             base_url=settings.openai_base_url,
             api_key=settings.openai_api_key,
             temperature=0,
+            reasoning_effort=settings.openai_reasoning_effort,
+            use_responses_api=_should_use_responses_api(
+                settings.openai_model,
+                settings.openai_base_url,
+            ),
             streaming=False,
         )
     return settings.openai_model

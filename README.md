@@ -49,6 +49,7 @@ frontend/
 OPENAI_API_KEY=
 OPENAI_MODEL=openai:gpt-5
 OPENAI_BASE_URL=
+OPENAI_REASONING_EFFORT=medium
 
 CONTAINER_NAME=deepagents-sandbox
 SANDBOX_WORKDIR=/workspace

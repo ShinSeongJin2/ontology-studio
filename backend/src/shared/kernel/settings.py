@@ -21,6 +21,7 @@ class Settings:
     openai_model: str
     openai_base_url: str
     openai_api_key: str
+    openai_reasoning_effort: str
     backend_host: str
     backend_port: int
     neo4j_uri: str
@@ -38,6 +39,7 @@ def get_settings() -> Settings:
         openai_model=os.environ.get("OPENAI_MODEL", "openai:gpt-5.4-2026-03-05"),
         openai_base_url=os.environ.get("OPENAI_BASE_URL", ""),
         openai_api_key=os.environ.get("OPENAI_API_KEY", ""),
+        openai_reasoning_effort=os.environ.get("OPENAI_REASONING_EFFORT", "medium"),
         backend_host=os.environ.get("BACKEND_HOST", "0.0.0.0"),
         backend_port=int(os.environ.get("BACKEND_PORT", "8000")),
         neo4j_uri=os.environ.get("NEO4J_URI", "bolt://localhost:7687"),
