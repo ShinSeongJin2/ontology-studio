@@ -54,26 +54,50 @@
         <div v-else-if="msg.role === 'assistant'" class="msg msg-assistant">
           <div class="msg-avatar">AI</div>
           <div class="msg-body">
-            <template v-for="(step, stepIndex) in msg.steps" :key="stepIndex">
-              <div v-if="step.type === 'token'" class="ai-text">{{ step.text }}</div>
-              <div
-                v-else-if="step.type === 'tool_start'"
-                class="tool-block tool-start"
-                :class="{ 'tool-neo4j': isNeo4jTool(step.name) }"
-              >
-                <span class="tool-badge" :class="{ 'badge-neo4j': isNeo4jTool(step.name) }">
-                  {{ isNeo4jTool(step.name) ? 'NEO4J' : 'TOOL' }}
-                </span>
-                <code>{{ step.name }}</code>
-                <span v-if="!step.done" class="tool-running">실행 중...</span>
+            <details
+              v-if="getToolGroups(msg).length"
+              class="tool-activity"
+              :open="hasRunningTools(msg)"
+            >
+              <summary class="tool-activity-summary">
+                <span
+                  class="tool-activity-dot"
+                  :class="hasRunningTools(msg) ? 'running' : 'done'"
+                ></span>
+                <span class="tool-activity-label">{{ getToolSummaryLabel(msg) }}</span>
+              </summary>
+              <div class="tool-activity-list">
+                <div
+                  v-for="(tool, ti) in getToolGroups(msg)"
+                  :key="ti"
+                  class="tool-activity-item"
+                >
+                  <div
+                    class="tool-activity-header"
+                    :class="{ 'tool-neo4j': isNeo4jTool(tool.name) }"
+                  >
+                    <span
+                      class="tool-badge"
+                      :class="{ 'badge-neo4j': isNeo4jTool(tool.name) }"
+                    >
+                      {{ isNeo4jTool(tool.name) ? 'NEO4J' : 'TOOL' }}
+                    </span>
+                    <code>{{ tool.name }}</code>
+                    <span v-if="!tool.done" class="tool-running">실행 중...</span>
+                    <span v-else class="tool-done-icon">&#10003;</span>
+                  </div>
+                  <details v-if="tool.result" class="tool-result-detail">
+                    <summary>결과 보기</summary>
+                    <pre>{{ tool.result }}</pre>
+                  </details>
+                </div>
               </div>
-              <div v-else-if="step.type === 'tool_result'" class="tool-block tool-result">
-                <details>
-                  <summary><code>{{ step.name }}</code> 결과</summary>
-                  <pre>{{ step.content }}</pre>
-                </details>
-              </div>
-            </template>
+            </details>
+
+            <MarkdownContent
+              v-if="getTextContent(msg)"
+              :content="getTextContent(msg)"
+            />
 
             <div v-if="msg.files && msg.files.length" class="msg-output-files">
               <button
@@ -128,6 +152,7 @@
 
 <script setup>
 import GoldenQuestionReviewPanel from '../ontology/GoldenQuestionReviewPanel.vue'
+import MarkdownContent from '../../shared/ui/MarkdownContent.vue'
 
 const inputText = defineModel('inputText', {
   type: String,
@@ -192,6 +217,43 @@ function updateBuildFeedback(message, index, value) {
     return
   }
   item.feedback = value
+}
+
+function getToolGroups(msg) {
+  const groups = []
+  for (const step of msg.steps) {
+    if (step.type === 'tool_start') {
+      groups.push({ name: step.name, done: step.done, result: null })
+    } else if (step.type === 'tool_result') {
+      for (let i = groups.length - 1; i >= 0; i--) {
+        if (groups[i].name === step.name && !groups[i].result) {
+          groups[i].result = step.content
+          break
+        }
+      }
+    }
+  }
+  return groups
+}
+
+function getTextContent(msg) {
+  return msg.steps
+    .filter((s) => s.type === 'token')
+    .map((s) => s.text)
+    .join('')
+}
+
+function hasRunningTools(msg) {
+  return msg.steps.some((s) => s.type === 'tool_start' && !s.done)
+}
+
+function getToolSummaryLabel(msg) {
+  const groups = getToolGroups(msg)
+  const running = groups.filter((g) => !g.done)
+  if (running.length) {
+    return `${running[running.length - 1].name} 실행 중...`
+  }
+  return `${groups.length}개 도구 사용됨`
 }
 
 function onEnter(event) {

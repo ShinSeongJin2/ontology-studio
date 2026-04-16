@@ -89,6 +89,7 @@ class SmartLogger:
         self._lock = threading.Lock()
         self._last_timestamp: str | None = None
         self._timestamp_counter = 0
+        self._startup_status_logged = False
 
         if self.file_output:
             self._prepare_output_dirs()
@@ -188,6 +189,38 @@ class SmartLogger:
         level_priority = self.LEVEL_PRIORITY.get(level.upper(), 1)
         min_priority = self.LEVEL_PRIORITY.get(self.include_all_min_level.upper(), 3)
         return level_priority >= min_priority
+
+    def log_startup_status(self) -> None:
+        should_log = False
+        with self._lock:
+            if not self._startup_status_logged:
+                self._startup_status_logged = True
+                should_log = True
+
+        if not should_log:
+            return
+
+        startup_level = self.min_level.upper()
+        if startup_level not in self.LEVEL_PRIORITY:
+            startup_level = "INFO"
+
+        self._log(
+            level=startup_level,
+            message="SmartLogger initialized during backend startup",
+            category="backend_status",
+            params={
+                "phase": "startup",
+                "pid": os.getpid(),
+                "main_log_path": self.main_log_path,
+                "detail_log_dir": self.detail_log_dir,
+                "min_level": self.min_level,
+                "include_all_min_level": self.include_all_min_level,
+                "console_output": self.console_output,
+                "file_output": self.file_output,
+                "remove_log_on_create": self.remove_log_on_create,
+                "blacklist_message_count": len(self.blacklist_messages),
+            },
+        )
 
     def _log(
         self,

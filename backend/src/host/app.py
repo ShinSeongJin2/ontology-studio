@@ -11,6 +11,7 @@ from ..modules.agent_session.api import router as agent_session_router
 from ..modules.agent_session.service import warm_up_agent
 from ..modules.files.api import router as files_router
 from ..modules.ontology.api import router as ontology_router
+from ..shared.logging import SmartLogger
 
 
 @asynccontextmanager
@@ -18,6 +19,7 @@ async def lifespan(app: FastAPI):
     """Warm up infrastructure used by the application."""
 
     del app
+    SmartLogger.instance().log_startup_status()
     warm_up_agent()
     yield
 

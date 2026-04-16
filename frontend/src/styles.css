@@ -1000,36 +1000,96 @@ body {
   padding: 12px 16px;
 }
 
-.ai-text {
-  font-size: 0.9rem;
-  line-height: 1.7;
-  white-space: pre-wrap;
-  word-break: break-word;
+/* ── Tool activity (collapsible section) ── */
+
+.tool-activity {
+  margin-bottom: 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.015);
+  overflow: hidden;
 }
 
-.tool-block {
-  margin: 8px 0;
-  padding: 8px 12px;
-  border-radius: 8px;
-  font-size: 0.82rem;
+.tool-activity-summary {
   display: flex;
   align-items: center;
   gap: 8px;
+  padding: 8px 12px;
+  cursor: pointer;
+  font-size: 0.82rem;
+  color: var(--text-muted);
+  user-select: none;
+  list-style: none;
+  transition: background 0.15s;
 }
 
-.tool-start {
-  background: rgba(210, 153, 34, 0.08);
-  border: 1px solid rgba(210, 153, 34, 0.2);
+.tool-activity-summary::-webkit-details-marker {
+  display: none;
 }
 
-.tool-neo4j {
+.tool-activity-summary:hover {
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.tool-activity-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.tool-activity-dot.running {
+  background: var(--yellow);
+  box-shadow: 0 0 6px rgba(210, 153, 34, 0.5);
+  animation: pulse 1.5s infinite;
+}
+
+.tool-activity-dot.done {
+  background: var(--green);
+}
+
+.tool-activity-label {
+  flex: 1;
+}
+
+.tool-activity-summary::after {
+  content: '▸';
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  transition: transform 0.2s;
+}
+
+.tool-activity[open] > .tool-activity-summary::after {
+  transform: rotate(90deg);
+}
+
+.tool-activity-list {
+  padding: 4px 12px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.tool-activity-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.tool-activity-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  border-radius: 6px;
+  font-size: 0.8rem;
+  background: rgba(210, 153, 34, 0.06);
+  border: 1px solid rgba(210, 153, 34, 0.12);
+}
+
+.tool-activity-header.tool-neo4j {
   background: rgba(1, 139, 255, 0.06);
-  border: 1px solid rgba(1, 139, 255, 0.2);
-}
-
-.tool-result {
-  background: rgba(46, 160, 67, 0.06);
-  border: 1px solid rgba(46, 160, 67, 0.15);
+  border-color: rgba(1, 139, 255, 0.15);
 }
 
 .tool-badge {
@@ -1037,9 +1097,10 @@ body {
   color: #000;
   padding: 1px 6px;
   border-radius: 4px;
-  font-size: 0.65rem;
+  font-size: 0.6rem;
   font-weight: 700;
   flex-shrink: 0;
+  letter-spacing: 0.3px;
 }
 
 .badge-neo4j {
@@ -1049,7 +1110,15 @@ body {
 
 .tool-running {
   color: var(--yellow);
+  font-size: 0.75rem;
+  margin-left: auto;
   animation: pulse 1.5s infinite;
+}
+
+.tool-done-icon {
+  color: var(--green);
+  font-size: 0.75rem;
+  margin-left: auto;
 }
 
 @keyframes pulse {
@@ -1063,25 +1132,191 @@ body {
   }
 }
 
-.tool-result details summary {
-  cursor: pointer;
-  color: var(--accent);
-  font-size: 0.82rem;
+.tool-result-detail {
+  margin-left: 8px;
 }
 
-.tool-result pre {
+.tool-result-detail summary {
+  cursor: pointer;
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  padding: 2px 4px;
+}
+
+.tool-result-detail summary:hover {
+  color: var(--accent);
+}
+
+.tool-result-detail pre {
   background: var(--bg);
   border: 1px solid var(--border);
   border-radius: 6px;
   padding: 10px;
-  margin-top: 6px;
-  font-size: 0.78rem;
+  margin-top: 4px;
+  font-size: 0.75rem;
   font-family: 'SF Mono', 'Fira Code', monospace;
   color: #7ee787;
   white-space: pre-wrap;
   word-break: break-all;
-  max-height: 250px;
+  max-height: 200px;
   overflow-y: auto;
+}
+
+/* ── Markdown body ── */
+
+.markdown-body {
+  font-size: 0.9rem;
+  line-height: 1.75;
+  word-break: break-word;
+  color: var(--text);
+}
+
+.markdown-body > *:first-child {
+  margin-top: 0;
+}
+
+.markdown-body > *:last-child {
+  margin-bottom: 0;
+}
+
+.markdown-body h1,
+.markdown-body h2,
+.markdown-body h3,
+.markdown-body h4,
+.markdown-body h5,
+.markdown-body h6 {
+  margin: 1.2em 0 0.6em;
+  font-weight: 600;
+  line-height: 1.35;
+}
+
+.markdown-body h1 {
+  font-size: 1.4em;
+  padding-bottom: 0.3em;
+  border-bottom: 1px solid var(--border);
+}
+
+.markdown-body h2 {
+  font-size: 1.2em;
+  padding-bottom: 0.25em;
+  border-bottom: 1px solid var(--border);
+}
+
+.markdown-body h3 {
+  font-size: 1.05em;
+}
+
+.markdown-body h4 {
+  font-size: 0.95em;
+}
+
+.markdown-body p {
+  margin: 0.6em 0;
+}
+
+.markdown-body ul,
+.markdown-body ol {
+  margin: 0.5em 0;
+  padding-left: 1.8em;
+}
+
+.markdown-body li {
+  margin: 0.25em 0;
+}
+
+.markdown-body li > ul,
+.markdown-body li > ol {
+  margin: 0.15em 0;
+}
+
+.markdown-body blockquote {
+  margin: 0.8em 0;
+  padding: 0.4em 1em;
+  border-left: 3px solid var(--accent);
+  background: rgba(88, 166, 255, 0.04);
+  color: var(--text-muted);
+}
+
+.markdown-body blockquote p {
+  margin: 0.3em 0;
+}
+
+.markdown-body code {
+  background: rgba(110, 118, 129, 0.2);
+  padding: 0.15em 0.4em;
+  border-radius: 4px;
+  font-size: 0.88em;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+}
+
+.markdown-body pre {
+  margin: 0.8em 0;
+  padding: 12px 16px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow-x: auto;
+}
+
+.markdown-body pre code {
+  background: none;
+  padding: 0;
+  border-radius: 0;
+  font-size: 0.82em;
+  color: #e6edf3;
+  white-space: pre;
+}
+
+.markdown-body strong {
+  font-weight: 600;
+  color: var(--text);
+}
+
+.markdown-body em {
+  font-style: italic;
+}
+
+.markdown-body a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.markdown-body a:hover {
+  text-decoration: underline;
+}
+
+.markdown-body hr {
+  margin: 1em 0;
+  border: none;
+  border-top: 1px solid var(--border);
+}
+
+.markdown-body table {
+  margin: 0.8em 0;
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 0.85em;
+}
+
+.markdown-body th,
+.markdown-body td {
+  padding: 6px 12px;
+  border: 1px solid var(--border);
+  text-align: left;
+}
+
+.markdown-body th {
+  background: var(--surface2);
+  font-weight: 600;
+}
+
+.markdown-body tr:nth-child(even) {
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.markdown-body img {
+  max-width: 100%;
+  border-radius: 8px;
 }
 
 .msg-output-files {
