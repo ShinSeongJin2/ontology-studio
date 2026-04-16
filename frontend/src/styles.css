@@ -31,7 +31,7 @@ body {
 }
 
 .sidebar {
-  width: 300px;
+  width: 260px;
   background: var(--surface);
   border-right: 1px solid var(--border);
   display: flex;
@@ -498,6 +498,43 @@ body {
 .sidebar-footer {
   padding: 12px;
   border-top: 1px solid var(--border);
+}
+
+.right-panel {
+  width: 300px;
+  background: var(--surface);
+  border-left: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+}
+
+.right-panel-header {
+  display: flex;
+  align-items: center;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.right-panel-header h3 {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.right-panel-scroll {
+  flex: 1;
+  overflow-y: auto;
+}
+
+.right-panel-scroll::-webkit-scrollbar {
+  width: 4px;
+}
+
+.right-panel-scroll::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 2px;
 }
 
 .btn-reset {

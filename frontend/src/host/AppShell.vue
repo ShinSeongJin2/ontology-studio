@@ -10,23 +10,6 @@
       </div>
 
       <div class="sidebar-scroll">
-        <TodoPanel
-          :open="panelOpen.todos"
-          :todos="todos"
-          @toggle="panelOpen.todos = !panelOpen.todos"
-        />
-        <OntologySchemaPanel
-          :entity-counts="entityCounts"
-          :open="panelOpen.schema"
-          :schema="schema"
-          @toggle="panelOpen.schema = !panelOpen.schema"
-        />
-        <ContextPanel
-          :open="panelOpen.context"
-          :ref-files="refFiles"
-          :skills="skills"
-          @toggle="panelOpen.context = !panelOpen.context"
-        />
         <FilePanel
           :open="panelOpen.files"
           :output-files="outputFiles"
@@ -52,6 +35,31 @@
       @send="send"
       @send-example="send"
     />
+
+    <aside class="right-panel">
+      <div class="right-panel-header">
+        <h3>세션 정보</h3>
+      </div>
+      <div class="right-panel-scroll">
+        <TodoPanel
+          :open="panelOpen.todos"
+          :todos="todos"
+          @toggle="panelOpen.todos = !panelOpen.todos"
+        />
+        <OntologySchemaPanel
+          :entity-counts="entityCounts"
+          :open="panelOpen.schema"
+          :schema="schema"
+          @toggle="panelOpen.schema = !panelOpen.schema"
+        />
+        <ContextPanel
+          :open="panelOpen.context"
+          :ref-files="refFiles"
+          :skills="skills"
+          @toggle="panelOpen.context = !panelOpen.context"
+        />
+      </div>
+    </aside>
   </div>
 </template>
 
