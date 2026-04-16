@@ -3,7 +3,8 @@
     <div class="chat-messages">
       <div v-if="messages.length === 0" class="welcome">
         <h1>Ontology Studio</h1>
-        <p>온톨로지 스키마를 설계하고, 문서에서 엔티티와 관계를 추출하세요.</p>
+        <div class="welcome-mode">{{ modeLabel }}</div>
+        <p>{{ modeDescription }}</p>
         <div class="examples">
           <button
             v-for="example in examples"
@@ -75,7 +76,7 @@
         <textarea
           v-model="inputText"
           rows="1"
-          placeholder="메시지를 입력하세요..."
+          :placeholder="inputPlaceholder"
           :disabled="isStreaming"
           @keydown.enter.exact="onEnter"
         />
@@ -102,6 +103,10 @@ defineProps({
     type: Array,
     required: true,
   },
+  inputPlaceholder: {
+    type: String,
+    required: true,
+  },
   isNeo4jTool: {
     type: Function,
     required: true,
@@ -112,6 +117,14 @@ defineProps({
   },
   messages: {
     type: Array,
+    required: true,
+  },
+  modeDescription: {
+    type: String,
+    required: true,
+  },
+  modeLabel: {
+    type: String,
     required: true,
   },
 })

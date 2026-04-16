@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from fastapi import APIRouter
 from fastapi.responses import StreamingResponse
 
@@ -12,13 +14,17 @@ router = APIRouter(tags=["agent-session"])
 
 
 @router.get("/api/stream")
-async def stream_endpoint(prompt: str = "", session_id: str = "default"):
+async def stream_endpoint(
+    prompt: str = "",
+    session_id: str = "default",
+    mode: Literal["build", "answer"] = "build",
+):
     """Stream agent events to the frontend via SSE."""
 
     if not prompt:
         return {"error": "prompt is required"}
     return StreamingResponse(
-        generate_sse(prompt, session_id),
+        generate_sse(prompt, session_id, mode),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache, no-store, must-revalidate, no-transform",

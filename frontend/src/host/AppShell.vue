@@ -10,7 +10,28 @@
       </div>
 
       <div class="sidebar-scroll">
+        <section class="mode-switcher">
+          <div class="mode-switcher-header">
+            <h3>작업 모드</h3>
+            <span class="mode-switcher-hint">스트리밍 중에는 변경할 수 없습니다.</span>
+          </div>
+          <div class="mode-switcher-buttons">
+            <button
+              v-for="option in modeOptions"
+              :key="option.key"
+              class="mode-switcher-btn"
+              :class="{ active: mode === option.key }"
+              :disabled="isStreaming"
+              @click="setMode(option.key)"
+            >
+              <span class="mode-switcher-btn-label">{{ option.label }}</span>
+              <span class="mode-switcher-btn-desc">{{ option.description }}</span>
+            </button>
+          </div>
+        </section>
+
         <FilePanel
+          v-if="showFilePanel"
           :open="panelOpen.files"
           :output-files="outputFiles"
           :uploaded-files="uploadedFiles"
@@ -18,6 +39,12 @@
           @toggle="panelOpen.files = !panelOpen.files"
           @upload="doUploadAndNotify"
         />
+
+        <section v-else class="mode-guide-card">
+          <h3>{{ currentModeMeta.label }}</h3>
+          <p>이 모드에서는 현재 구축된 온톨로지만 조회하며, 문서 업로드나 그래프 수정 도구는 사용하지 않습니다.</p>
+          <p>스키마를 만들거나 엔티티를 저장하려면 온톨로지 구축 모드로 전환하세요.</p>
+        </section>
       </div>
 
       <div class="sidebar-footer">
@@ -28,9 +55,12 @@
     <ChatPanel
       v-model:input-text="inputText"
       :examples="examples"
+      :input-placeholder="currentModeMeta.inputPlaceholder"
       :is-neo4j-tool="isNeo4jTool"
       :is-streaming="isStreaming"
       :messages="messages"
+      :mode-description="currentModeMeta.description"
+      :mode-label="currentModeMeta.label"
       @download="downloadFile"
       @send="send"
       @send-example="send"
@@ -73,6 +103,7 @@ import { useOntologyStudio } from '../shared/hooks/useOntologyStudio.js'
 import Neo4jStatusBadge from '../shared/ui/Neo4jStatusBadge.vue'
 
 const {
+  currentModeMeta,
   doUploadAndNotify,
   downloadFile,
   entityCounts,
@@ -81,6 +112,8 @@ const {
   isNeo4jTool,
   isStreaming,
   messages,
+  mode,
+  modeOptions,
   neo4jConnected,
   outputFiles,
   panelOpen,
@@ -89,6 +122,8 @@ const {
   resetSession,
   schema,
   send,
+  setMode,
+  showFilePanel,
   skills,
   todos,
   uploadedFiles,

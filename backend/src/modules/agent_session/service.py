@@ -7,6 +7,7 @@ import json
 import re
 import threading
 from pathlib import Path
+from typing import Literal
 
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, ToolMessage
 
@@ -15,6 +16,7 @@ from ..ontology.tools import (
     entity_create,
     entity_search,
     neo4j_cypher,
+    neo4j_cypher_readonly,
     relationship_create,
     schema_create_class,
     schema_create_relationship_type,
@@ -23,10 +25,12 @@ from ..ontology.tools import (
 from ...shared.kernel.settings import get_settings
 from ...shared.sandbox.docker_backend import DockerSandboxBackend
 
-_agent = None
+AgentMode = Literal["build", "answer"]
+
+_agents: dict[AgentMode, object] = {}
 _sessions: dict[str, list] = {}
 
-ONTOLOGY_SYSTEM_PROMPT = """\
+ONTOLOGY_BUILD_SYSTEM_PROMPT = """\
 한국어로 응답하세요. 당신은 Ontology Studio 에이전트입니다.
 
 ## 역할
@@ -61,6 +65,30 @@ ONTOLOGY_SYSTEM_PROMPT = """\
 - 대량의 엔티티를 추출할 때는 문서를 섹션별로 나누어 처리하세요
 """
 
+ONTOLOGY_ANSWER_SYSTEM_PROMPT = """\
+한국어로 응답하세요. 당신은 Ontology Studio 질의 응답 에이전트입니다.
+
+## 역할
+이미 구축된 온톨로지와 그래프를 조회하여, 사용자의 구체적인 질문에 정확하게 답변합니다.
+
+## 핵심 원칙
+- 이 모드는 조회 전용입니다. 스키마, 엔티티, 관계를 생성/수정/삭제하지 마세요.
+- 문서를 다시 파싱하거나 파일 시스템을 탐색하려고 하지 마세요.
+- 답변 전에 필요한 경우 schema_get, entity_search, neo4j_cypher_readonly 도구로 근거를 확인하세요.
+- 온톨로지에 없는 내용은 추측하지 말고, 정보가 부족하다고 명확히 말하세요.
+- 사용자가 그래프를 바꾸거나 새 온톨로지를 만들고 싶다면 온톨로지 구축 모드로 전환하라고 안내하세요.
+
+## 도구 사용 가이드
+- schema_get(): 현재 온톨로지 스키마와 관계 정의를 확인
+- entity_search(class_name, search_criteria): 특정 클래스 엔티티를 조건으로 조회
+- neo4j_cypher_readonly(query, params): 읽기 전용 Cypher 조회. MATCH/OPTIONAL MATCH/WHERE/WITH/RETURN 중심으로 사용
+
+## 답변 방식
+- 먼저 질문 의도를 짧게 정리한 뒤 필요한 조회를 수행하세요.
+- 조회 결과를 바탕으로 간결하고 검증 가능한 답변을 작성하세요.
+- 필요한 경우 어떤 엔티티/관계/스키마 근거를 사용했는지 함께 설명하세요.
+"""
+
 _SENTINEL = object()
 _NEO4J_TOOL_NAMES = {
     "schema_create_class",
@@ -70,6 +98,22 @@ _NEO4J_TOOL_NAMES = {
     "relationship_create",
     "neo4j_cypher",
 }
+
+_BUILD_MODE_TOOLS = [
+    neo4j_cypher,
+    schema_create_class,
+    schema_create_relationship_type,
+    schema_get,
+    entity_create,
+    entity_search,
+    relationship_create,
+]
+
+_ANSWER_MODE_TOOLS = [
+    schema_get,
+    entity_search,
+    neo4j_cypher_readonly,
+]
 
 
 def _normalize_openai_model_name(model_name: str) -> str:
@@ -109,46 +153,66 @@ def _init_model():
     return settings.openai_model
 
 
-def get_agent():
-    """Return the singleton deep agent instance."""
+def _create_build_agent():
+    """Create the ontology construction agent with sandbox access."""
 
-    global _agent
-    if _agent is None:
-        from deepagents import create_deep_agent
+    from deepagents import create_deep_agent
 
-        settings = get_settings()
-        backend = DockerSandboxBackend(
-            container_name=settings.container_name,
-            workdir=settings.sandbox_workdir,
-        )
-        _agent = create_deep_agent(
-            model=_init_model(),
-            backend=backend,
-            tools=[
-                neo4j_cypher,
-                schema_create_class,
-                schema_create_relationship_type,
-                schema_get,
-                entity_create,
-                entity_search,
-                relationship_create,
-            ],
-            system_prompt=ONTOLOGY_SYSTEM_PROMPT,
-        )
-    return _agent
+    settings = get_settings()
+    backend = DockerSandboxBackend(
+        container_name=settings.container_name,
+        workdir=settings.sandbox_workdir,
+    )
+    return create_deep_agent(
+        model=_init_model(),
+        backend=backend,
+        tools=_BUILD_MODE_TOOLS,
+        system_prompt=ONTOLOGY_BUILD_SYSTEM_PROMPT,
+    )
+
+
+def _create_answer_agent():
+    """Create the question-answering agent with read-only ontology tools."""
+
+    from deepagents import create_deep_agent
+
+    return create_deep_agent(
+        model=_init_model(),
+        tools=_ANSWER_MODE_TOOLS,
+        system_prompt=ONTOLOGY_ANSWER_SYSTEM_PROMPT,
+    )
+
+
+def get_agent(mode: AgentMode = "build"):
+    """Return the singleton deep agent instance for the requested mode."""
+
+    if mode not in _agents:
+        if mode == "build":
+            _agents[mode] = _create_build_agent()
+        else:
+            _agents[mode] = _create_answer_agent()
+    return _agents[mode]
+
+
+def _session_key(session_id: str, mode: AgentMode) -> str:
+    """Return the in-memory session key for the mode-specific conversation."""
+
+    return f"{session_id}:{mode}"
 
 
 def warm_up_agent() -> None:
     """Initialize agent dependencies eagerly on app startup."""
 
-    get_agent()
+    get_agent("build")
+    get_agent("answer")
     ensure_workspace_dirs()
 
 
 def clear_session(session_id: str) -> None:
     """Drop in-memory history for a single session."""
 
-    _sessions.pop(session_id, None)
+    for mode in ("build", "answer"):
+        _sessions.pop(_session_key(session_id, mode), None)
 
 
 def _format_sse(event: str, data: dict) -> str:
@@ -202,16 +266,18 @@ def _emit_tool_side_effects(
 def _run_agent_in_thread(
     prompt: str,
     session_id: str,
+    mode: AgentMode,
     queue: asyncio.Queue,
     loop: asyncio.AbstractEventLoop,
 ) -> None:
     """Run the synchronous agent stream on a background thread."""
 
     try:
-        agent = get_agent()
-        if session_id not in _sessions:
-            _sessions[session_id] = []
-        history = _sessions[session_id]
+        agent = get_agent(mode)
+        history_key = _session_key(session_id, mode)
+        if history_key not in _sessions:
+            _sessions[history_key] = []
+        history = _sessions[history_key]
         history.append(HumanMessage(content=prompt))
 
         settings = get_settings()
@@ -227,19 +293,20 @@ def _run_agent_in_thread(
         loop.call_soon_threadsafe(queue.put_nowait, _SENTINEL)
 
 
-async def generate_sse(prompt: str, session_id: str):
+async def generate_sse(prompt: str, session_id: str, mode: AgentMode = "build"):
     """Yield streaming agent events as SSE messages."""
 
     queue: asyncio.Queue = asyncio.Queue()
     loop = asyncio.get_running_loop()
     thread = threading.Thread(
         target=_run_agent_in_thread,
-        args=(prompt, session_id, queue, loop),
+        args=(prompt, session_id, mode, queue, loop),
         daemon=True,
     )
     thread.start()
 
-    yield _format_sse("status", {"message": "에이전트 실행 시작..."})
+    mode_label = "온톨로지 구축" if mode == "build" else "질문 응답"
+    yield _format_sse("status", {"message": f"{mode_label} 모드 실행 시작..."})
 
     generated_files: list[str] = []
     seen_skills: set[str] = set()

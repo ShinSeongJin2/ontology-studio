@@ -123,6 +123,98 @@ body {
   border-radius: 2px;
 }
 
+.mode-switcher {
+  padding: 14px 12px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.mode-switcher-header {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 0 4px 10px;
+}
+
+.mode-switcher-header h3 {
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-muted);
+}
+
+.mode-switcher-hint {
+  color: var(--text-muted);
+  font-size: 0.72rem;
+}
+
+.mode-switcher-buttons {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.mode-switcher-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  width: 100%;
+  padding: 10px 12px;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  color: var(--text);
+  cursor: pointer;
+  text-align: left;
+  transition: border-color 0.2s, background 0.2s, transform 0.2s;
+}
+
+.mode-switcher-btn:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: rgba(88, 166, 255, 0.06);
+  transform: translateY(-1px);
+}
+
+.mode-switcher-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.mode-switcher-btn.active {
+  border-color: rgba(88, 166, 255, 0.55);
+  background: rgba(88, 166, 255, 0.1);
+}
+
+.mode-switcher-btn-label {
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
+.mode-switcher-btn-desc {
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  line-height: 1.4;
+}
+
+.mode-guide-card {
+  margin: 12px;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.mode-guide-card h3 {
+  font-size: 0.95rem;
+  margin-bottom: 8px;
+}
+
+.mode-guide-card p {
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  line-height: 1.5;
+}
+
 .panel {
   border-bottom: 1px solid var(--border);
 }
@@ -596,6 +688,16 @@ body {
 .welcome p {
   color: var(--text-muted);
   font-size: 0.95rem;
+}
+
+.welcome-mode {
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(88, 166, 255, 0.35);
+  background: rgba(88, 166, 255, 0.08);
+  color: var(--accent);
+  font-size: 0.78rem;
+  font-weight: 600;
 }
 
 .examples {

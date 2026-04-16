@@ -3,13 +3,19 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
-from neo4j import GraphDatabase
+from neo4j import GraphDatabase, READ_ACCESS
 
 from ...shared.kernel.settings import get_settings
 
 _driver = None
+_READONLY_CYPHER_FORBIDDEN = re.compile(
+    r"\b(CREATE|MERGE|DELETE|DETACH|SET|REMOVE|DROP|FOREACH|CALL)\b|LOAD\s+CSV",
+    re.IGNORECASE,
+)
+_CYPHER_COMMENT_PATTERN = re.compile(r"//.*?$|/\*.*?\*/", re.MULTILINE | re.DOTALL)
 
 
 def get_driver():
@@ -34,6 +40,15 @@ def _run_query(query: str, params: dict | None = None) -> list[dict]:
         return [record.data() for record in result]
 
 
+def _run_readonly_query(query: str, params: dict | None = None) -> list[dict]:
+    """Execute a read-only Cypher query and return row dictionaries."""
+
+    driver = get_driver()
+    with driver.session(default_access_mode=READ_ACCESS) as session:
+        result = session.run(query, params or {})
+        return [record.data() for record in result]
+
+
 def _node_to_dict(node) -> dict:
     """Convert a Neo4j node into a serializable dictionary."""
 
@@ -42,24 +57,60 @@ def _node_to_dict(node) -> dict:
     return {"id": node.element_id, "labels": list(node.labels), **dict(node)}
 
 
+def _serialize_rows(rows: list[dict]) -> str:
+    """Serialize Neo4j rows into JSON-friendly dictionaries."""
+
+    serialized = []
+    for row in rows:
+        serialized_row = {}
+        for key, value in row.items():
+            if hasattr(value, "element_id"):
+                serialized_row[key] = _node_to_dict(value)
+            elif hasattr(value, "type"):
+                serialized_row[key] = {"type": value.type, **dict(value)}
+            else:
+                serialized_row[key] = value
+        serialized.append(serialized_row)
+    return json.dumps(serialized, ensure_ascii=False, default=str)
+
+
+def _is_readonly_cypher(query: str) -> bool:
+    """Return True when the Cypher query avoids mutating clauses."""
+
+    sanitized = re.sub(_CYPHER_COMMENT_PATTERN, " ", query or "")
+    return _READONLY_CYPHER_FORBIDDEN.search(sanitized) is None
+
+
 def neo4j_cypher(query: str, params: str = "{}") -> str:
     """Execute an arbitrary Cypher query against Neo4j."""
 
     try:
         parsed_params = json.loads(params) if params else {}
         rows = _run_query(query, parsed_params)
-        serialized = []
-        for row in rows:
-            serialized_row = {}
-            for key, value in row.items():
-                if hasattr(value, "element_id"):
-                    serialized_row[key] = _node_to_dict(value)
-                elif hasattr(value, "type"):
-                    serialized_row[key] = {"type": value.type, **dict(value)}
-                else:
-                    serialized_row[key] = value
-            serialized.append(serialized_row)
-        return json.dumps(serialized, ensure_ascii=False, default=str)
+        return _serialize_rows(rows)
+    except Exception as exc:  # pragma: no cover - passthrough error handling
+        return json.dumps({"error": str(exc)}, ensure_ascii=False)
+
+
+def neo4j_cypher_readonly(query: str, params: str = "{}") -> str:
+    """Execute a read-only Cypher query against Neo4j."""
+
+    try:
+        if not query.strip():
+            return json.dumps({"error": "query is required"}, ensure_ascii=False)
+        if not _is_readonly_cypher(query):
+            return json.dumps(
+                {
+                    "error": (
+                        "읽기 전용 조회만 허용됩니다. "
+                        "MATCH, OPTIONAL MATCH, WHERE, WITH, RETURN 중심의 Cypher만 사용하세요."
+                    )
+                },
+                ensure_ascii=False,
+            )
+        parsed_params = json.loads(params) if params else {}
+        rows = _run_readonly_query(query, parsed_params)
+        return _serialize_rows(rows)
     except Exception as exc:  # pragma: no cover - passthrough error handling
         return json.dumps({"error": str(exc)}, ensure_ascii=False)
 

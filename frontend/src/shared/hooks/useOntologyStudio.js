@@ -1,10 +1,11 @@
-import { nextTick, onMounted, onUnmounted, reactive, ref } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref } from 'vue'
 
 const API = import.meta.env.VITE_API_BASE || 'http://localhost:8000'
 const SESSION_ID = 'default'
 
 const NEO4J_TOOLS = [
   'neo4j_cypher',
+  'neo4j_cypher_readonly',
   'schema_create_class',
   'schema_create_relationship_type',
   'schema_get',
@@ -13,21 +14,55 @@ const NEO4J_TOOLS = [
   'relationship_create',
 ]
 
-const examples = [
-  '업로드한 문서에서 엔티티를 추출해줘',
-  '현재 스키마를 보여줘',
-  'Neo4j에 저장된 엔티티들을 확인해줘',
-]
+const MODES = {
+  build: {
+    key: 'build',
+    label: '온톨로지 구축',
+    description: '문서를 분석하고 스키마, 엔티티, 관계를 생성하는 작업 모드입니다.',
+    inputPlaceholder: '문서 기반 온톨로지 구축 작업을 요청하세요...',
+    allowsFiles: true,
+    examples: [
+      '업로드한 문서에서 엔티티를 추출해줘',
+      '현재 스키마를 보여줘',
+      '문서 내용을 바탕으로 관계 유형을 제안해줘',
+    ],
+  },
+  answer: {
+    key: 'answer',
+    label: '질문 응답',
+    description: '이미 구축된 온톨로지를 조회해 구체적인 질문에 답변하는 모드입니다.',
+    inputPlaceholder: '구축된 온톨로지에 대한 질문을 입력하세요...',
+    allowsFiles: false,
+    examples: [
+      '현재 그래프에 어떤 클래스와 관계가 정의되어 있어?',
+      'Company 클래스 엔티티를 찾아줘',
+      'Person과 Company 사이에 어떤 관계가 있는지 설명해줘',
+    ],
+  },
+}
+
+const MODE_KEYS = Object.keys(MODES)
+
+function createModeState() {
+  return {
+    draft: '',
+    messages: [],
+    todos: [],
+    skills: [],
+    refFiles: [],
+  }
+}
 
 export function useOntologyStudio() {
-  const messages = ref([])
-  const inputText = ref('')
+  const mode = ref('build')
+  const modeOptions = Object.values(MODES)
+  const modeState = reactive({
+    build: createModeState(),
+    answer: createModeState(),
+  })
   const isStreaming = ref(false)
   const uploadedFiles = ref([])
   const outputFiles = ref([])
-  const todos = ref([])
-  const skills = ref([])
-  const refFiles = ref([])
   const panelOpen = reactive({
     todos: true,
     context: true,
@@ -37,8 +72,38 @@ export function useOntologyStudio() {
   const neo4jConnected = ref(false)
   const schema = ref({ classes: [], relationships: [] })
   const entityCounts = ref([])
+  const currentModeMeta = computed(() => MODES[mode.value])
+  const inputText = computed({
+    get: () => modeState[mode.value].draft,
+    set: (value) => {
+      modeState[mode.value].draft = value
+    },
+  })
+  const messages = computed(() => modeState[mode.value].messages)
+  const todos = computed(() => modeState[mode.value].todos)
+  const skills = computed(() => modeState[mode.value].skills)
+  const refFiles = computed(() => modeState[mode.value].refFiles)
+  const examples = computed(() => currentModeMeta.value.examples)
+  const showFilePanel = computed(() => currentModeMeta.value.allowsFiles)
 
   let neo4jInterval = null
+
+  function getModeState(targetMode = mode.value) {
+    return modeState[targetMode]
+  }
+
+  function replaceItems(target, items) {
+    target.splice(0, target.length, ...items)
+  }
+
+  function resetModeState(targetMode) {
+    const state = getModeState(targetMode)
+    state.draft = ''
+    replaceItems(state.messages, [])
+    replaceItems(state.todos, [])
+    replaceItems(state.skills, [])
+    replaceItems(state.refFiles, [])
+  }
 
   function isNeo4jTool(name) {
     return NEO4J_TOOLS.includes(name)
@@ -51,6 +116,14 @@ export function useOntologyStudio() {
         chat.scrollTop = chat.scrollHeight
       }
     })
+  }
+
+  function setMode(nextMode) {
+    if (!MODES[nextMode] || nextMode === mode.value || isStreaming.value) {
+      return
+    }
+    mode.value = nextMode
+    scrollBottom()
   }
 
   async function checkNeo4jStatus() {
@@ -133,9 +206,13 @@ export function useOntologyStudio() {
   }
 
   async function doUploadAndNotify(fileList) {
+    if (!currentModeMeta.value.allowsFiles) {
+      return
+    }
+
     const names = await uploadFiles(fileList)
     if (names.length) {
-      messages.value.push({
+      getModeState().messages.push({
         role: 'user',
         text: `파일 업로드: ${names.join(', ')}`,
         files: names,
@@ -149,21 +226,26 @@ export function useOntologyStudio() {
   }
 
   async function send(textOverride = null) {
-    const text = (textOverride ?? inputText.value).trim()
+    const currentMode = mode.value
+    const state = getModeState(currentMode)
+    const text = (textOverride ?? state.draft).trim()
     if (!text || isStreaming.value) {
       return
     }
 
-    messages.value.push({ role: 'user', text })
-    inputText.value = ''
+    state.messages.push({ role: 'user', text, mode: currentMode })
+    state.draft = ''
     scrollBottom()
 
-    messages.value.push({ role: 'assistant', steps: [], files: [] })
+    state.messages.push({ role: 'assistant', steps: [], files: [], mode: currentMode })
     isStreaming.value = true
-    const getAiMsg = () => messages.value[messages.value.length - 1]
+    const getAiMsg = () => {
+      const currentMessages = getModeState(currentMode).messages
+      return currentMessages[currentMessages.length - 1]
+    }
     let currentTokenIdx = -1
 
-    const url = `${API}/api/stream?prompt=${encodeURIComponent(text)}&session_id=${SESSION_ID}`
+    const url = `${API}/api/stream?prompt=${encodeURIComponent(text)}&session_id=${SESSION_ID}&mode=${currentMode}`
     const es = new EventSource(url)
 
     es.addEventListener('token', (event) => {
@@ -205,20 +287,22 @@ export function useOntologyStudio() {
 
     es.addEventListener('todos', (event) => {
       const data = JSON.parse(event.data)
-      todos.value = data.items || []
+      replaceItems(getModeState(currentMode).todos, data.items || [])
     })
 
     es.addEventListener('skill_loaded', (event) => {
       const data = JSON.parse(event.data)
-      if (!skills.value.includes(data.name)) {
-        skills.value.push(data.name)
+      const currentSkills = getModeState(currentMode).skills
+      if (!currentSkills.includes(data.name)) {
+        currentSkills.push(data.name)
       }
     })
 
     es.addEventListener('ref_file', (event) => {
       const data = JSON.parse(event.data)
-      if (!refFiles.value.includes(data.name)) {
-        refFiles.value.push(data.name)
+      const currentRefFiles = getModeState(currentMode).refFiles
+      if (!currentRefFiles.includes(data.name)) {
+        currentRefFiles.push(data.name)
       }
     })
 
@@ -253,12 +337,11 @@ export function useOntologyStudio() {
 
   async function resetSession() {
     await fetch(`${API}/api/session/reset`, { method: 'POST' })
-    messages.value = []
     uploadedFiles.value = []
     outputFiles.value = []
-    todos.value = []
-    skills.value = []
-    refFiles.value = []
+    for (const key of MODE_KEYS) {
+      resetModeState(key)
+    }
     await refreshSchema()
   }
 
@@ -274,12 +357,15 @@ export function useOntologyStudio() {
   })
 
   return {
+    currentModeMeta,
     entityCounts,
     examples,
     inputText,
     isNeo4jTool,
     isStreaming,
     messages,
+    mode,
+    modeOptions,
     neo4jConnected,
     outputFiles,
     panelOpen,
@@ -288,6 +374,8 @@ export function useOntologyStudio() {
     resetSession,
     schema,
     send,
+    setMode,
+    showFilePanel,
     skills,
     todos,
     uploadedFiles,
