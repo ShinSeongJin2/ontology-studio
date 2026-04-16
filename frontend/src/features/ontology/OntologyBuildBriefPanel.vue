@@ -25,9 +25,21 @@
           <div class="build-brief-field">
             <div class="build-brief-field-header">
               <span>Golden Question</span>
-              <button class="btn-inline-add" :disabled="isStreaming" @click="$emit('add-question')">
-                질문 추가
-              </button>
+              <div class="build-brief-field-actions">
+                <button class="btn-inline-add" :disabled="isStreaming" @click="triggerFileUpload">
+                  파일에서 불러오기
+                </button>
+                <button class="btn-inline-add" :disabled="isStreaming" @click="$emit('add-question')">
+                  질문 추가
+                </button>
+              </div>
+              <input
+                ref="fileInputRef"
+                type="file"
+                accept=".txt,.csv,.tsv"
+                hidden
+                @change="onFileSelected"
+              />
             </div>
 
             <div class="golden-question-list">
@@ -75,6 +87,8 @@
 </template>
 
 <script setup>
+import { ref } from 'vue'
+
 defineProps({
   intent: {
     type: String,
@@ -94,11 +108,36 @@ defineProps({
   },
 })
 
-defineEmits([
+const emit = defineEmits([
   'add-question',
+  'import-questions',
   'remove-question',
   'start-build',
   'update:intent',
   'update:question',
 ])
+
+const fileInputRef = ref(null)
+
+function triggerFileUpload() {
+  fileInputRef.value?.click()
+}
+
+function onFileSelected(event) {
+  const file = event.target.files?.[0]
+  if (!file) return
+
+  const reader = new FileReader()
+  reader.onload = (e) => {
+    const lines = e.target.result
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean)
+    if (lines.length > 0) {
+      emit('import-questions', lines)
+    }
+  }
+  reader.readAsText(file)
+  event.target.value = ''
+}
 </script>

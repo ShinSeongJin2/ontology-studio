@@ -60,6 +60,7 @@
         :intent="buildIntent"
         :is-streaming="isStreaming"
         @add-question="addBuildGoldenQuestion"
+        @import-questions="importBuildGoldenQuestions"
         @remove-question="removeBuildGoldenQuestion"
         @start-build="send"
         @update:intent="buildIntent = $event"
@@ -124,6 +125,7 @@ import Neo4jStatusBadge from '../shared/ui/Neo4jStatusBadge.vue'
 
 const {
   addBuildGoldenQuestion,
+  importBuildGoldenQuestions,
   buildGoldenQuestions,
   buildIntent,
   canSend,

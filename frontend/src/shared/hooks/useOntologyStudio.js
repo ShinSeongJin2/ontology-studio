@@ -206,6 +206,16 @@ export function useOntologyStudio() {
     buildBrief.value.goldenQuestions.push('')
   }
 
+  function importBuildGoldenQuestions(questions) {
+    const existing = buildBrief.value.goldenQuestions
+    const hasOnlyEmptySlot = existing.length === 1 && !existing[0].trim()
+    if (hasOnlyEmptySlot) {
+      buildBrief.value.goldenQuestions = [...questions]
+    } else {
+      buildBrief.value.goldenQuestions.push(...questions)
+    }
+  }
+
   function removeBuildGoldenQuestion(index) {
     if (buildBrief.value.goldenQuestions.length === 1) {
       buildBrief.value.goldenQuestions[0] = ''
@@ -573,6 +583,7 @@ export function useOntologyStudio() {
 
   return {
     addBuildGoldenQuestion,
+    importBuildGoldenQuestions,
     buildGoldenQuestions,
     buildIntent,
     canSend,
