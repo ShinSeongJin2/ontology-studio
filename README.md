@@ -132,30 +132,6 @@ npm run dev
 4. 프론트엔드를 실행합니다.
 5. 브라우저에서 `http://localhost:5173`에 접속합니다.
 
-## E2E 테스트
-
-`test_e2e.py`는 프론트와 백엔드가 이미 실행 중이라고 가정합니다. Playwright는 현재 프로젝트 의존성과 별도로 설치합니다.
-
-```bash
-uv pip install playwright
-uv run playwright install chromium
-uv run python test_e2e.py
-```
-
-파일 업로드 테스트까지 포함하려면 샘플 문서 경로를 지정하세요.
-
-```bash
-export ONTOLOGY_STUDIO_SAMPLE_PDF=/absolute/path/to/sample.pdf
-uv run python test_e2e.py
-```
-
-지원하는 선택 환경 변수:
-
-- `ONTOLOGY_STUDIO_FRONTEND_URL`: 기본값 `http://localhost:5173`
-- `ONTOLOGY_STUDIO_API_URL`: 기본값 `http://localhost:8000`
-- `ONTOLOGY_STUDIO_SAMPLE_PDF`: 업로드 테스트용 문서 경로
-- `ONTOLOGY_STUDIO_SCREENSHOT_PATH`: 스크린샷 저장 경로
-
 ## 참고 사항
 
 - 백엔드는 시작 시 샌드박스 컨테이너 내부의 `/workspace/uploads`, `/workspace/output` 디렉터리를 준비합니다.
