@@ -54,6 +54,13 @@ def _node_to_dict(node) -> dict:
 
     if node is None:
         return {}
+    if isinstance(node, dict):
+        return dict(node)
+    if not hasattr(node, "element_id"):
+        try:
+            return dict(node)
+        except Exception:
+            return {"value": node}
     return {"id": node.element_id, "labels": list(node.labels), **dict(node)}
 
 
@@ -297,11 +304,38 @@ def entity_search(class_name: str, search_criteria: str) -> str:
     """Search existing entities by class and property filters."""
 
     try:
-        criteria = json.loads(search_criteria) if search_criteria else {}
+        raw_criteria = (search_criteria or "").strip()
+        use_contains_for_name = False
+        if not raw_criteria:
+            return json.dumps([], ensure_ascii=False)
+
+        try:
+            criteria = json.loads(raw_criteria)
+        except json.JSONDecodeError:
+            parsed_pairs = {}
+            for part in raw_criteria.split(","):
+                if ":" not in part:
+                    continue
+                key, value = part.split(":", maxsplit=1)
+                key = key.strip().strip("\"'")
+                value = value.strip().strip("\"'")
+                if key and value:
+                    parsed_pairs[key] = value
+            if parsed_pairs:
+                criteria = parsed_pairs
+            else:
+                criteria = {"name": raw_criteria}
+                use_contains_for_name = True
+
         if not criteria:
             return json.dumps([], ensure_ascii=False)
 
-        conditions = [f"n.{key} = ${key}" for key in criteria]
+        conditions = []
+        for key in criteria:
+            if use_contains_for_name and key == "name":
+                conditions.append(f"n.{key} CONTAINS ${key}")
+            else:
+                conditions.append(f"n.{key} = ${key}")
         query = f"""
         MATCH (n:_Entity:{class_name})
         WHERE {' AND '.join(conditions)}
@@ -344,9 +378,9 @@ def entity_create(
 
         query = f"""
         MERGE (n:_Entity:{class_name} {{ {merge_clause} }})
+        ON CREATE SET n.created_at = datetime()
         SET {set_clause},
             n.updated_at = datetime()
-        ON CREATE SET n.created_at = datetime()
         RETURN n
         """
 
@@ -385,8 +419,8 @@ def relationship_create(
         MATCH (from_n:_Entity) WHERE elementId(from_n) = $from_entity_id
         MATCH (to_n:_Entity) WHERE elementId(to_n) = $to_entity_id
         MERGE (from_n)-[r:{relationship_type}]->(to_n)
-        SET r.updated_at = datetime(){set_props}
         ON CREATE SET r.created_at = datetime()
+        SET r.updated_at = datetime(){set_props}
         RETURN from_n, r, to_n
         """
         params = {

@@ -44,3 +44,5 @@ input/
 # Private Datas
 p_*
 AGENTS.md
+.cursor
+.cache

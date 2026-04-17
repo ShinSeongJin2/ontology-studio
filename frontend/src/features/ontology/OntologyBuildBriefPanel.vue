@@ -6,7 +6,7 @@
           <h1 class="build-brief-title">Ontology Studio</h1>
           <div class="welcome-mode">온톨로지 구축</div>
           <p class="build-brief-desc">
-            구축 의도와 반드시 답해야 하는 Golden Question을 정의한 뒤, 구축을 시작하세요.
+            구축 의도와 반드시 답해야 하는 Golden Question을 정의한 뒤, OCR -> 임베딩 -> 그래프 적재 -> 온톨로지 구축 순서로 시작하세요.
           </p>
         </div>
 

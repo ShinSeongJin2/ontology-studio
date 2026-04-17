@@ -47,9 +47,16 @@ frontend/
 
 ```env
 OPENAI_API_KEY=
-OPENAI_MODEL=openai:gpt-5
 OPENAI_BASE_URL=
-OPENAI_REASONING_EFFORT=medium
+
+MAJOR_MODEL=openai:gpt-5.4-2026-03-05
+MAJOR_MODEL_REASONING_EFFORT=medium
+MINOR_MODEL=gpt-5.4-mini-2026-03-17
+MINOR_MODEL_REASONING_EFFORT=medium
+OCR_MODEL=gpt-5.4-mini-2026-03-17
+OCR_MODEL_REASONING_EFFORT=none
+OCR_EMBEDDING_MODEL=openai:text-embedding-3-small
+USE_OCR_CACHE=false
 
 CONTAINER_NAME=deepagents-sandbox
 SANDBOX_WORKDIR=/workspace
@@ -61,6 +68,8 @@ NEO4J_URI=bolt://localhost:7687
 NEO4J_USER=neo4j
 NEO4J_PASSWORD=12345678
 ```
+
+`MAJOR_MODEL`, `MINOR_MODEL`, `OCR_MODEL`, `OCR_EMBEDDING_MODEL`은 모두 `openai:` 접두 형식과 bare 모델명 형식을 함께 허용합니다. 현재 OpenAI 계열 모델을 사용할 때는 공통으로 `OPENAI_BASE_URL`, `OPENAI_API_KEY`를 재사용합니다.
 
 ## Neo4j 준비
 

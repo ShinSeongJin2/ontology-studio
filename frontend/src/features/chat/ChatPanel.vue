@@ -97,6 +97,28 @@
               </div>
             </div>
 
+            <div v-if="showPreprocessCard(msg)" class="preprocess-card">
+              <div class="preprocess-title">문서 전처리</div>
+              <div v-if="msg.preprocessState?.message || msg.statusMessage" class="preprocess-message">
+                {{ msg.preprocessState?.message || msg.statusMessage }}
+              </div>
+              <div v-if="getPreprocessMeta(msg)" class="preprocess-meta">
+                {{ getPreprocessMeta(msg) }}
+              </div>
+              <div
+                v-if="msg.preprocessSummary?.documents?.length"
+                class="preprocess-summary"
+              >
+                <div
+                  v-for="doc in msg.preprocessSummary.documents"
+                  :key="doc.documentId"
+                  class="preprocess-summary-item"
+                >
+                  {{ doc.documentName }} · {{ doc.chunkCount }}개 청크 · OCR 캐시 {{ doc.ocrCachedPages?.length || 0 }}페이지
+                </div>
+              </div>
+            </div>
+
             <MarkdownContent
               v-if="getTextContent(msg)"
               :content="getTextContent(msg)"
@@ -249,6 +271,36 @@ function getTextContent(msg) {
     .join('')
 }
 
+function getPreprocessMeta(msg) {
+  const state = msg.preprocessState
+  if (!state) {
+    return ''
+  }
+
+  const parts = []
+  if (state.documentName) {
+    parts.push(state.documentName)
+  }
+  if (state.pageCurrent && state.pageTotal) {
+    parts.push(`${state.pageCurrent}/${state.pageTotal}페이지`)
+  }
+  if (typeof state.progress === 'number') {
+    parts.push(`${state.progress}%`)
+  }
+  if (state.cacheHit) {
+    parts.push('OCR 캐시 사용')
+  }
+  return parts.join(' · ')
+}
+
+function showPreprocessCard(msg) {
+  return Boolean(
+    msg.preprocessState ||
+    msg.preprocessSummary ||
+    (msg.mode === 'build' && msg.statusMessage && !getTextContent(msg))
+  )
+}
+
 function hasRunningTools(msg) {
   return msg.steps.some((s) => s.type === 'tool_start' && !s.done)
 }
@@ -291,3 +343,43 @@ function onEnter(event) {
   }
 }
 </script>
+
+<style scoped>
+.preprocess-card {
+  margin-bottom: 12px;
+  padding: 12px 14px;
+  border: 1px solid rgba(120, 120, 120, 0.18);
+  border-radius: 12px;
+  background: rgba(120, 120, 120, 0.06);
+}
+
+.preprocess-title {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  opacity: 0.72;
+}
+
+.preprocess-message {
+  margin-top: 6px;
+  font-weight: 600;
+}
+
+.preprocess-meta {
+  margin-top: 4px;
+  font-size: 13px;
+  opacity: 0.8;
+}
+
+.preprocess-summary {
+  margin-top: 8px;
+  display: grid;
+  gap: 4px;
+}
+
+.preprocess-summary-item {
+  font-size: 13px;
+  opacity: 0.88;
+}
+</style>

@@ -14,6 +14,8 @@ from typing import Any, Literal
 
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, ToolMessage
 
+from ..document_indexing.service import DocumentIndexingService
+from ..document_indexing.tools import hybrid_search_chunks
 from ..files.service import ensure_workspace_dirs, list_output_filenames
 from ..ontology.tools import (
     entity_create,
@@ -26,6 +28,10 @@ from ..ontology.tools import (
     schema_get,
 )
 from ...shared.logging import log_agent_event
+from ...shared.kernel.model_profiles import (
+    resolve_model_profile,
+    should_use_openai_responses_api,
+)
 from ...shared.kernel.settings import get_settings
 from ...shared.sandbox.docker_backend import DockerSandboxBackend
 
@@ -38,15 +44,15 @@ ONTOLOGY_BUILD_SYSTEM_PROMPT = """\
 한국어로 응답하세요. 당신은 Ontology Studio 에이전트입니다.
 
 ## 역할
-사용자가 온톨로지 스키마를 설계하고, 문서에서 엔티티와 관계를 추출하여 Neo4j에 저장하도록 돕습니다.
+사용자가 온톨로지 스키마를 설계하고, OCR + 하이브리드 검색으로 준비된 문서 청크를 근거로 엔티티와 관계를 추출하여 Neo4j에 저장하도록 돕습니다.
 
 ## 작업 흐름
 1. **스키마 설계**: schema_create_class, schema_create_relationship_type 도구로 온톨로지 스키마를 정의
-2. **문서 처리**: execute 도구로 업로드된 문서(PDF, DOCX 등)의 텍스트를 추출 (pdfplumber, python-docx 사용)
-3. **엔티티 추출**: 문서 텍스트를 분석하여 스키마에 맞는 엔티티를 식별
+2. **그래프 범위 파악**: schema_get, entity_search, neo4j_cypher로 현재 스키마/엔티티/관계를 파악
+3. **근거 검색**: hybrid_search_chunks로 OCR 청크를 검색하고, 필요하면 graph 탐색 결과의 node id를 target_node_ids로 넘겨 범위를 좁힘
 4. **중복 해결(Disambiguation)**: entity_search로 기존 엔티티를 검색하여 동일 엔티티는 재사용
 5. **관계 추출**: 엔티티 간 관계를 식별하고 relationship_create로 저장
-6. **저장**: 모든 결과를 Neo4j에 저장
+6. **출처 보존**: 엔티티/관계를 만들 때 가능한 한 source_text, chunk_ref, source_page, document_id 같은 근거 속성을 함께 남김
 
 ## 도구 사용 가이드
 - schema_get(): 현재 온톨로지 스키마 전체 조회
@@ -56,17 +62,18 @@ ONTOLOGY_BUILD_SYSTEM_PROMPT = """\
 - entity_create(class_name, properties, match_keys): 엔티티 인스턴스 생성 (MERGE로 중복 방지)
 - relationship_create(from_entity_id, to_entity_id, relationship_type, properties): 엔티티 간 관계 생성
 - neo4j_cypher(query, params): 고급 Cypher 쿼리 직접 실행
-- execute: Python 코드 실행 (문서 파싱, 데이터 처리에 사용)
+- hybrid_search_chunks(query, top_k, target_node_ids, document_ids, chunk_refs, source_pages): OCR 청크에서 BM25 + 벡터 검색을 RRF로 결합한 근거 검색
 
 ## 중요 규칙
 - 엔티티 생성 전 항상 entity_search로 기존 엔티티 확인하세요
-- 문서 파싱 시 execute 도구로 pdfplumber(PDF), python-docx(DOCX) 사용
+- 업로드 문서는 이미 OCR, 청킹, 임베딩, Document/Chunk 적재가 끝난 상태라고 가정하세요
+- execute나 파일 시스템 탐색으로 문서를 다시 파싱하지 마세요. 문서 탐색은 반드시 hybrid_search_chunks와 Neo4j 조회만 사용하세요
 - 스키마 클래스명은 영문 PascalCase (예: Person, Company, Accident)
 - 관계 유형명은 영문 UPPER_SNAKE_CASE (예: WORKS_AT, OCCURRED_AT)
 - entity_create 시 match_keys로 중복 방지 키를 지정하세요
-- 파일은 /workspace/uploads/에서 읽고, /workspace/output/에 저장하세요
 - 각 도구 호출 전에 한국어로 간단히 설명하세요
-- 대량의 엔티티를 추출할 때는 문서를 섹션별로 나누어 처리하세요
+- 멀티홉 질문이나 구축 의도가 보이면 먼저 그래프를 좁히고, 그 다음 관련 leaf에 대해 hybrid_search_chunks를 호출하세요
+- entity나 relationship를 생성할 때는 가능하면 chunk_ref, source_page, source_text를 속성으로 저장해 나중에 다시 검색 범위를 좁힐 수 있게 하세요
 - 사용자가 제공한 구축 의도(intent)와 Golden Question을 최우선 목표로 삼으세요
 - 온톨로지 구축 완료 기준은 "현재 그래프와 스키마만으로 Golden Question에 답할 수 있는가" 입니다
 - Golden Question에 충분히 답하지 못하면 스키마와 추출 결과를 추가로 보강하세요
@@ -102,7 +109,7 @@ ONTOLOGY_ANSWER_SYSTEM_PROMPT = """\
 ## 핵심 원칙
 - 이 모드는 조회 전용입니다. 스키마, 엔티티, 관계를 생성/수정/삭제하지 마세요.
 - 문서를 다시 파싱하거나 파일 시스템을 탐색하려고 하지 마세요.
-- 답변 전에 필요한 경우 schema_get, entity_search, neo4j_cypher_readonly 도구로 근거를 확인하세요.
+- 답변 전에 필요한 경우 schema_get, entity_search, neo4j_cypher_readonly, hybrid_search_chunks 도구로 근거를 확인하세요.
 - 온톨로지에 없는 내용은 추측하지 말고, 정보가 부족하다고 명확히 말하세요.
 - 사용자가 그래프를 바꾸거나 새 온톨로지를 만들고 싶다면 온톨로지 구축 모드로 전환하라고 안내하세요.
 
@@ -110,9 +117,11 @@ ONTOLOGY_ANSWER_SYSTEM_PROMPT = """\
 - schema_get(): 현재 온톨로지 스키마와 관계 정의를 확인
 - entity_search(class_name, search_criteria): 특정 클래스 엔티티를 조건으로 조회
 - neo4j_cypher_readonly(query, params): 읽기 전용 Cypher 조회. MATCH/OPTIONAL MATCH/WHERE/WITH/RETURN 중심으로 사용
+- hybrid_search_chunks(query, top_k, target_node_ids, document_ids, chunk_refs, source_pages): OCR 청크 기반 하이브리드 검색
 
 ## 답변 방식
 - 먼저 질문 의도를 짧게 정리한 뒤 필요한 조회를 수행하세요.
+- 멀티홉 질문이면 먼저 그래프를 좁히고, 필요한 경우 관련 node id를 target_node_ids로 넘겨 hybrid_search_chunks를 호출하세요.
 - 조회 결과를 바탕으로 간결하고 검증 가능한 답변을 작성하세요.
 - 필요한 경우 어떤 엔티티/관계/스키마 근거를 사용했는지 함께 설명하세요.
 """
@@ -135,12 +144,14 @@ _BUILD_MODE_TOOLS = [
     entity_create,
     entity_search,
     relationship_create,
+    hybrid_search_chunks,
 ]
 
 _ANSWER_MODE_TOOLS = [
     schema_get,
     entity_search,
     neo4j_cypher_readonly,
+    hybrid_search_chunks,
 ]
 
 _BUILD_REPORT_PATTERN = re.compile(
@@ -148,6 +159,7 @@ _BUILD_REPORT_PATTERN = re.compile(
     re.DOTALL,
 )
 _TEXT_CONTENT_BLOCK_TYPES = {"text", "output_text"}
+_document_indexing_service = DocumentIndexingService()
 
 
 def _parse_json_if_possible(value: str) -> Any | None:
@@ -442,41 +454,46 @@ def _merge_stream_text(current_text: str, incoming_text: str) -> tuple[str, str]
     return current_text + incoming_text, incoming_text
 
 
-def _normalize_openai_model_name(model_name: str) -> str:
-    """Convert provider-prefixed OpenAI model identifiers to bare model names."""
-
-    if model_name.startswith("openai:"):
-        return model_name.split(":", maxsplit=1)[1]
-    return model_name
-
-
-def _should_use_responses_api(model_name: str, base_url: str) -> bool:
-    """Use Responses API for official OpenAI GPT-5 models."""
-
-    normalized_model = _normalize_openai_model_name(model_name)
-    return not base_url and normalized_model.startswith("gpt-5")
-
-
-def _init_model():
-    """Create the configured model instance or provider string."""
+def _resolve_agent_model_profile(mode: AgentMode):
+    """Resolve the configured model profile for a given agent mode."""
 
     settings = get_settings()
-    if settings.openai_base_url or settings.openai_model.startswith("openai:"):
+    if mode == "build":
+        return resolve_model_profile(
+            purpose="major",
+            model_name=settings.major_model,
+            reasoning_effort=settings.major_model_reasoning_effort,
+            openai_base_url=settings.openai_base_url,
+            openai_api_key=settings.openai_api_key,
+        )
+    return resolve_model_profile(
+        purpose="minor",
+        model_name=settings.minor_model,
+        reasoning_effort=settings.minor_model_reasoning_effort,
+        openai_base_url=settings.openai_base_url,
+        openai_api_key=settings.openai_api_key,
+    )
+
+
+def _init_model(mode: AgentMode):
+    """Create the configured model instance or provider string."""
+
+    profile = _resolve_agent_model_profile(mode)
+    if profile.is_openai:
         from langchain_openai import ChatOpenAI
 
-        return ChatOpenAI(
-            model=_normalize_openai_model_name(settings.openai_model),
-            base_url=settings.openai_base_url,
-            api_key=settings.openai_api_key,
-            temperature=0,
-            reasoning_effort=settings.openai_reasoning_effort,
-            use_responses_api=_should_use_responses_api(
-                settings.openai_model,
-                settings.openai_base_url,
-            ),
-            streaming=False,
-        )
-    return settings.openai_model
+        kwargs = {
+            "model": profile.model_name,
+            "api_key": profile.api_key,
+            "temperature": 0,
+            "reasoning_effort": profile.reasoning_effort,
+            "use_responses_api": should_use_openai_responses_api(profile),
+            "streaming": False,
+        }
+        if profile.base_url:
+            kwargs["base_url"] = profile.base_url
+        return ChatOpenAI(**kwargs)
+    return profile.raw_name
 
 
 def _create_build_agent():
@@ -490,7 +507,7 @@ def _create_build_agent():
         workdir=settings.sandbox_workdir,
     )
     return create_deep_agent(
-        model=_init_model(),
+        model=_init_model("build"),
         backend=backend,
         tools=_BUILD_MODE_TOOLS,
         system_prompt=ONTOLOGY_BUILD_SYSTEM_PROMPT,
@@ -503,7 +520,7 @@ def _create_answer_agent():
     from deepagents import create_deep_agent
 
     return create_deep_agent(
-        model=_init_model(),
+        model=_init_model("answer"),
         tools=_ANSWER_MODE_TOOLS,
         system_prompt=ONTOLOGY_ANSWER_SYSTEM_PROMPT,
     )
@@ -544,6 +561,36 @@ def clear_session(session_id: str) -> None:
 def _format_sse(event: str, data: dict) -> str:
     encoded = json.dumps(data, ensure_ascii=False)
     return f"event: {event}\ndata: {encoded}\n\n"
+
+
+def _build_preprocessing_todos(current_stage: str) -> list[dict[str, str]]:
+    stages = [
+        ("ocr", "PDF OCR 처리"),
+        ("embedding", "청크 임베딩 생성"),
+        ("neo4j_upsert", "Neo4j 문서 그래프 업로드"),
+        ("agent_build", "온톨로지 구축 에이전트 실행"),
+    ]
+    completed = True
+    items = []
+    for stage_id, label in stages:
+        if stage_id == current_stage:
+            items.append({"id": stage_id, "content": label, "status": "in_progress"})
+            completed = False
+            continue
+        if completed:
+            items.append({"id": stage_id, "content": label, "status": "completed"})
+        else:
+            items.append({"id": stage_id, "content": label, "status": "pending"})
+    return items
+
+
+def _resolve_preprocess_stage(detail: dict[str, Any] | None) -> str:
+    if not detail:
+        return "ocr"
+    stage = _clean_text(detail.get("stage"))
+    if stage in {"ocr", "embedding", "neo4j_upsert"}:
+        return stage
+    return "ocr"
 
 
 def _emit_tool_side_effects(
@@ -608,8 +655,8 @@ def _run_agent_in_thread(
         history_length_before = len(history)
         history.append(HumanMessage(content=prompt))
 
-        settings = get_settings()
-        stream_modes = ["messages", "updates"] if not settings.openai_base_url else ["updates"]
+        model_profile = _resolve_agent_model_profile(mode)
+        stream_modes = ["messages", "updates"] if not model_profile.uses_custom_base_url else ["updates"]
         log_agent_event(
             "INFO",
             "agent_stream_thread_started",
@@ -660,7 +707,8 @@ async def generate_sse(
         _compose_build_prompt(prompt, build_context) if mode == "build" else prompt
     )
     settings = get_settings()
-    stream_modes = ["messages", "updates"] if not settings.openai_base_url else ["updates"]
+    model_profile = _resolve_agent_model_profile(mode)
+    stream_modes = ["messages", "updates"] if not model_profile.uses_custom_base_url else ["updates"]
     run_id = uuid.uuid4().hex
     run_started_at = time.perf_counter()
     queue: asyncio.Queue = asyncio.Queue()
@@ -675,28 +723,12 @@ async def generate_sse(
         raw_build_context=raw_build_context if mode == "build" else None,
         parsed_build_context=build_context if mode == "build" else None,
         effective_prompt=effective_prompt,
-        model_name=settings.openai_model,
-        using_custom_base_url=bool(settings.openai_base_url),
+        model_name=model_profile.raw_name,
+        using_custom_base_url=model_profile.uses_custom_base_url,
         sandbox_container_name=settings.container_name,
         sandbox_workdir=settings.sandbox_workdir,
         stream_modes=stream_modes,
     )
-    thread = threading.Thread(
-        target=_run_agent_in_thread,
-        args=(effective_prompt, session_id, mode, run_id, queue, loop),
-        daemon=True,
-    )
-    thread.start()
-
-    mode_label = "온톨로지 구축" if mode == "build" else "질문 응답"
-    status_message = f"{mode_label} 모드 실행 시작..."
-    if mode == "build" and build_context["golden_questions"]:
-        status_message = (
-            f"{mode_label} 모드 실행 시작... "
-            f"{len(build_context['golden_questions'])}개의 Golden Question 기준으로 구축합니다."
-        )
-    yield _format_sse("status", {"message": status_message})
-
     generated_files: list[str] = []
     seen_skills: set[str] = set()
     seen_refs: set[str] = set()
@@ -712,6 +744,89 @@ async def generate_sse(
     run_failed = False
     error_message = ""
     assistant_text = ""
+    mode_label = "온톨로지 구축" if mode == "build" else "질문 응답"
+    if mode == "build":
+        status_message = "온톨로지 구축 전처리 시작..."
+        if build_context["golden_questions"]:
+            status_message = (
+                "온톨로지 구축 전처리 시작... "
+                f"{len(build_context['golden_questions'])}개의 Golden Question 기준으로 준비합니다."
+            )
+        yield _format_sse("status", {"message": status_message})
+        current_preprocess_stage = "ocr"
+        yield _format_sse("todos", {"items": _build_preprocessing_todos(current_preprocess_stage)})
+
+        preprocess_queue: asyncio.Queue = asyncio.Queue()
+
+        async def _on_preprocess_progress(
+            progress: int,
+            message: str,
+            detail: dict[str, Any] | None,
+        ) -> None:
+            await preprocess_queue.put(
+                {
+                    "progress": progress,
+                    "message": message,
+                    "detail": detail or {},
+                }
+            )
+
+        preprocess_task = asyncio.create_task(
+            _document_indexing_service.ingest_uploaded_pdfs(
+                on_progress=_on_preprocess_progress,
+            )
+        )
+
+        while True:
+            if preprocess_task.done() and preprocess_queue.empty():
+                break
+            try:
+                event = await asyncio.wait_for(preprocess_queue.get(), timeout=0.2)
+            except asyncio.TimeoutError:
+                continue
+            current_preprocess_stage = _resolve_preprocess_stage(event["detail"])
+            yield _format_sse("status", {"message": event["message"]})
+            yield _format_sse(
+                "preprocess_progress",
+                {
+                    "progress": event["progress"],
+                    "message": event["message"],
+                    **event["detail"],
+                },
+            )
+            yield _format_sse("todos", {"items": _build_preprocessing_todos(current_preprocess_stage)})
+
+        try:
+            ingestion_summary = await preprocess_task
+        except Exception as exc:
+            run_failed = True
+            error_message = str(exc)
+            log_agent_event(
+                "ERROR",
+                "document_preprocessing_failed",
+                run_id=run_id,
+                session_id=session_id,
+                mode=mode,
+                error=error_message,
+            )
+            yield _format_sse("error_event", {"message": str(exc)})
+            return
+
+        yield _format_sse(
+            "preprocess_complete",
+            {"summary": ingestion_summary},
+        )
+        yield _format_sse("todos", {"items": _build_preprocessing_todos("agent_build")})
+        yield _format_sse("status", {"message": "전처리 완료. 온톨로지 구축 에이전트를 시작합니다."})
+    else:
+        yield _format_sse("status", {"message": f"{mode_label} 모드 실행 시작..."})
+
+    thread = threading.Thread(
+        target=_run_agent_in_thread,
+        args=(effective_prompt, session_id, mode, run_id, queue, loop),
+        daemon=True,
+    )
+    thread.start()
 
     def _register_tool_start(
         tool_call_id: str,
@@ -1031,6 +1146,18 @@ async def generate_sse(
         final_text=final_text,
         build_report=build_report,
     )
+    if mode == "build" and not run_failed:
+        yield _format_sse(
+            "todos",
+            {
+                "items": [
+                    {"id": "ocr", "content": "PDF OCR 처리", "status": "completed"},
+                    {"id": "embedding", "content": "청크 임베딩 생성", "status": "completed"},
+                    {"id": "neo4j_upsert", "content": "Neo4j 문서 그래프 업로드", "status": "completed"},
+                    {"id": "agent_build", "content": "온톨로지 구축 에이전트 실행", "status": "completed"},
+                ]
+            },
+        )
     yield _format_sse(
         "done",
         {

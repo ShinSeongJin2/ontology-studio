@@ -254,6 +254,13 @@ export function useOntologyStudio() {
     replaceItems(message.steps, nextSteps)
   }
 
+  function updateAssistantPreprocessState(message, data = {}) {
+    message.preprocessState = {
+      ...(message.preprocessState || {}),
+      ...data,
+    }
+  }
+
   function normalizeReportFeedback(message) {
     const report = message?.buildReport
     if (!report) {
@@ -443,6 +450,24 @@ export function useOntologyStudio() {
       refreshSchema()
     })
 
+    es.addEventListener('preprocess_progress', (event) => {
+      const data = JSON.parse(event.data)
+      const aiMsg = getAiMsg()
+      updateAssistantPreprocessState(aiMsg, data)
+      scrollBottom()
+    })
+
+    es.addEventListener('preprocess_complete', (event) => {
+      const data = JSON.parse(event.data)
+      const aiMsg = getAiMsg()
+      aiMsg.preprocessSummary = data.summary || null
+      updateAssistantPreprocessState(aiMsg, {
+        completed: true,
+        progress: 100,
+      })
+      scrollBottom()
+    })
+
     es.addEventListener('todos', (event) => {
       const data = JSON.parse(event.data)
       replaceItems(getModeState(currentMode).todos, data.items || [])
@@ -464,7 +489,12 @@ export function useOntologyStudio() {
       }
     })
 
-    es.addEventListener('status', scrollBottom)
+    es.addEventListener('status', (event) => {
+      const data = JSON.parse(event.data)
+      const aiMsg = getAiMsg()
+      aiMsg.statusMessage = data.message || ''
+      scrollBottom()
+    })
     es.addEventListener('node_update', scrollBottom)
 
     es.addEventListener('done', (event) => {
