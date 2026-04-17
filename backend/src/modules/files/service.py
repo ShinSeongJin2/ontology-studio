@@ -53,11 +53,75 @@ def ensure_workspace_dirs() -> None:
     )
 
 
+def _format_file_size(size_bytes: int) -> str:
+    """Return a human-readable file size string."""
+
+    size = float(max(size_bytes, 0))
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if size < 1024 or unit == "TB":
+            if unit == "B":
+                return f"{int(size)} B"
+            rounded = round(size, 1)
+            if rounded.is_integer():
+                return f"{int(rounded)} {unit}"
+            return f"{rounded:.1f} {unit}"
+        size /= 1024
+    return "0 B"
+
+
+def _list_local_upload_records() -> list[dict]:
+    """Return uploaded files using the backend-local cache as source of truth."""
+
+    uploads = []
+    for path in list_local_upload_files():
+        uploads.append(
+            {
+                "name": path.name,
+                "size": _format_file_size(path.stat().st_size),
+            }
+        )
+    return uploads
+
+
+def _list_container_output_records() -> list[dict]:
+    """Return generated output files from the sandbox container."""
+
+    settings = get_settings()
+    result = subprocess.run(
+        [
+            "docker",
+            "exec",
+            settings.container_name,
+            "bash",
+            "-c",
+            "ls -lh /workspace/output/ 2>/dev/null",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return []
+
+    output_files = []
+    for line in result.stdout.strip().splitlines():
+        if not line or line.startswith("total"):
+            continue
+        parts = line.split()
+        if len(parts) >= 9:
+            output_files.append(
+                {
+                    "name": " ".join(parts[8:]),
+                    "size": parts[4],
+                }
+            )
+    return output_files
+
+
 async def save_uploads(files: list[UploadFile]) -> list[dict]:
     """Copy uploaded files into the sandbox workspace."""
 
+    ensure_workspace_dirs()
     settings = get_settings()
-    _LOCAL_UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
     uploaded = []
     for uploaded_file in files:
         content = await uploaded_file.read()
@@ -107,39 +171,10 @@ async def save_uploads(files: list[UploadFile]) -> list[dict]:
 def list_workspace_files() -> dict:
     """Return upload and output file listings from the sandbox."""
 
-    settings = get_settings()
-    result = subprocess.run(
-        [
-            "docker",
-            "exec",
-            settings.container_name,
-            "bash",
-            "-c",
-            "echo '=== uploads ===' && ls -lh /workspace/uploads/ 2>/dev/null && "
-            "echo '=== output ===' && ls -lh /workspace/output/ 2>/dev/null",
-        ],
-        capture_output=True,
-        text=True,
-    )
-    files = {"uploads": [], "output": []}
-    current = None
-    for line in result.stdout.strip().split("\n"):
-        if "=== uploads ===" in line:
-            current = "uploads"
-            continue
-        if "=== output ===" in line:
-            current = "output"
-            continue
-        if current and line and not line.startswith("total"):
-            parts = line.split()
-            if len(parts) >= 9:
-                files[current].append(
-                    {
-                        "name": " ".join(parts[8:]),
-                        "size": parts[4],
-                    }
-                )
-    return files
+    return {
+        "uploads": _list_local_upload_records(),
+        "output": _list_container_output_records(),
+    }
 
 
 def list_output_filenames() -> list[str]:
