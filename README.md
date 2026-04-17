@@ -1,6 +1,6 @@
 # Ontology Studio
 
-Ontology Studio는 온톨로지 스키마를 설계하고, 문서에서 엔티티와 관계를 추출해 Neo4j에 저장할 수 있도록 돕는 단일 배포형 애플리케이션입니다. 현재 구조는 `AGENTS.md`의 모듈러 모놀리스 원칙에 맞춰 백엔드는 `backend/`, 프론트엔드는 `features`/`shared` 단위로 정리되어 있습니다.
+Ontology Studio는 온톨로지 스키마를 설계하고, 문서에서 엔티티와 관계를 추출해 Neo4j에 저장할 수 있도록 돕는 단일 배포형 애플리케이션입니다.
 
 ## 프로젝트 구조
 
