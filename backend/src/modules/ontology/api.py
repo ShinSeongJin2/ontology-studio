@@ -4,9 +4,19 @@ from __future__ import annotations
 
 import json
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Body, HTTPException
 
-from .tools import get_driver, schema_get
+from .schema_models import OntologySchemaModel
+from .schema_store import (
+    delete_schema,
+    get_active_schema,
+    get_schema_by_id,
+    list_saved_schemas,
+    rename_schema,
+    save_schema_snapshot,
+    set_active_schema,
+)
+from .tools import get_driver, project_graph_to_schema, schema_get
 
 router = APIRouter(tags=["ontology"])
 
@@ -91,3 +101,89 @@ async def get_graph(class_name: str = "", limit: int = 100):
         return {"nodes": list(nodes.values()), "edges": edges}
     except Exception as exc:  # pragma: no cover - passthrough error handling
         return {"nodes": [], "edges": [], "error": str(exc)}
+
+
+def _load_projected_schema_or_raise(
+    *,
+    name: str = "Layered Ontology Snapshot",
+    description: str = "",
+    domain: str = "",
+) -> OntologySchemaModel:
+    projected = project_graph_to_schema(name=name, description=description, domain=domain)
+    try:
+        payload = json.loads(projected)
+    except json.JSONDecodeError as exc:  # pragma: no cover - passthrough error handling
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    if isinstance(payload, dict) and payload.get("error"):
+        raise HTTPException(status_code=500, detail=str(payload["error"]))
+    return OntologySchemaModel.model_validate(payload)
+
+
+@router.get("/api/ontology/schema")
+async def get_active_ontology_schema():
+    """Return the active saved ontology schema or project the current graph."""
+
+    schema = get_active_schema()
+    if schema is not None:
+        return schema.model_dump()
+    projected = _load_projected_schema_or_raise()
+    return projected.model_dump()
+
+
+@router.post("/api/ontology/schema")
+async def save_ontology_schema(schema: OntologySchemaModel | None = Body(default=None)):
+    """Persist the provided schema snapshot or project and save the active graph."""
+
+    target_schema = schema or _load_projected_schema_or_raise()
+    return save_schema_snapshot(target_schema)
+
+
+@router.get("/api/ontology/schemas")
+async def list_ontology_schemas():
+    """List saved ontology schema snapshots."""
+
+    return list_saved_schemas()
+
+
+@router.get("/api/ontology/schemas/{schema_id}")
+async def get_ontology_schema(schema_id: str):
+    """Return a stored schema snapshot by id."""
+
+    schema = get_schema_by_id(schema_id)
+    if schema is None:
+        raise HTTPException(status_code=404, detail="schema not found")
+    return schema.model_dump()
+
+
+@router.post("/api/ontology/schemas/{schema_id}/activate")
+async def activate_ontology_schema(schema_id: str):
+    """Activate a stored ontology schema snapshot."""
+
+    try:
+        return set_active_schema(schema_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.patch("/api/ontology/schemas/{schema_id}")
+async def patch_ontology_schema(schema_id: str, payload: dict = Body(default_factory=dict)):
+    """Rename or update the metadata of a saved schema."""
+
+    try:
+        return rename_schema(
+            schema_id,
+            name=payload.get("name"),
+            description=payload.get("description"),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.delete("/api/ontology/schemas/{schema_id}")
+async def delete_ontology_schema(schema_id: str):
+    """Delete a stored schema snapshot."""
+
+    try:
+        return delete_schema(schema_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc

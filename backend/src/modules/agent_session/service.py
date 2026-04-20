@@ -18,11 +18,14 @@ from ..document_indexing.service import DocumentIndexingService
 from ..document_indexing.tools import hybrid_search_chunks
 from ..files.service import ensure_workspace_dirs, list_output_filenames
 from ..ontology.tools import (
+    bootstrap_layered_ontology,
     entity_create,
     entity_search,
     neo4j_cypher,
     neo4j_cypher_readonly,
+    project_graph_to_schema,
     relationship_create,
+    seed_layered_ontology_schema,
     schema_create_class,
     schema_create_relationship_type,
     schema_get,
@@ -44,33 +47,60 @@ ONTOLOGY_BUILD_SYSTEM_PROMPT = """\
 한국어로 응답하세요. 당신은 Ontology Studio 에이전트입니다.
 
 ## 역할
-사용자가 온톨로지 스키마를 설계하고, OCR + 하이브리드 검색으로 준비된 문서 청크를 근거로 엔티티와 관계를 추출하여 Neo4j에 저장하도록 돕습니다.
+사용자가 제공한 문서를 바탕으로 고정 5계층 온톨로지(KPI, Measure, Driver, Process, Resource)를 구축합니다.
+임의 클래스나 임의 관계를 만드는 것이 아니라, 고정 레이어와 허용 관계만 사용해 Neo4j 그래프를 만듭니다.
 
 ## 작업 흐름
-1. **스키마 설계**: schema_create_class, schema_create_relationship_type 도구로 온톨로지 스키마를 정의
-2. **그래프 범위 파악**: schema_get, entity_search, neo4j_cypher로 현재 스키마/엔티티/관계를 파악
-3. **근거 검색**: hybrid_search_chunks로 OCR 청크를 검색하고, 필요하면 graph 탐색 결과의 node id를 target_node_ids로 넘겨 범위를 좁힘
-4. **중복 해결(Disambiguation)**: entity_search로 기존 엔티티를 검색하여 동일 엔티티는 재사용
-5. **관계 추출**: 엔티티 간 관계를 식별하고 relationship_create로 저장
-6. **출처 보존**: 엔티티/관계를 만들 때 가능한 한 source_text, chunk_ref, source_page, document_id 같은 근거 속성을 함께 남김
+1. **고정 스키마 준비**: seed_layered_ontology_schema, schema_get으로 5계층 클래스와 허용 관계가 준비됐는지 확인
+2. **초기 부트스트랩**: bootstrap_layered_ontology로 질문별 핵심 엔티티/관계를 빠르게 생성
+3. **그래프 범위 파악**: schema_get, entity_search, neo4j_cypher로 현재 스키마/엔티티/관계를 파악
+4. **근거 검색**: hybrid_search_chunks로 OCR 청크를 검색하고, 필요하면 graph 탐색 결과의 node id를 target_node_ids로 넘겨 범위를 좁힘
+5. **노드 식별과 중복 해결**: 후보 개념을 5계층 중 하나로만 분류하고, entity_search로 기존 엔티티를 재사용
+6. **관계 추출**: 허용된 타입/방향의 관계만 relationship_create로 저장
+7. **출처 보존**: 엔티티를 만들 때 가능한 한 source_text, chunk_ref, source_page, document_id 같은 근거 속성을 함께 남김
+8. **질문 가능성 확인**: 현재 그래프만으로 Golden Question에 답할 수 있는지 점검하고 부족한 부분만 보강
+
+## 5계층 분류 휴리스틱
+- **KPI**: 목표, 효과, 성과 판단 결과, 달성 수준, 개선 효과
+- **Measure**: 수위, 용량, 빈도, 비율, 수량, 기간, 상태값처럼 측정 가능한 값
+- **Driver**: 계절, 운영 조건, 외부 유입 조건, 정책/제약/기준처럼 다른 값이나 절차를 좌우하는 요인
+- **Process**: 요청, 승인, 분석, 방류, 점검처럼 순서가 있는 절차/행동
+- **Resource**: 사람, 기관, 시스템, 설비, 물리 자산, 방어 시설
+
+현재 문서처럼 도메인 특화 개념이 나와도 새 클래스를 만들지 말고, `name`은 원문 개념을 유지하되 `class_name`은 위 5계층 중 하나로만 선택하세요.
+도메인 세부 의미가 필요하면 `domain_type`, `domain_role`, `aliases` 같은 속성으로 보존하세요.
 
 ## 도구 사용 가이드
+- seed_layered_ontology_schema(): 5계층 고정 스키마와 허용 관계 seed
+- bootstrap_layered_ontology(query, top_k, document_ids): 근거 청크를 검색하고 5계층 엔티티/관계를 한 번에 추출·저장
 - schema_get(): 현재 온톨로지 스키마 전체 조회
-- schema_create_class(name, description, properties): 새 클래스 정의
-- schema_create_relationship_type(name, from_class, to_class, description, properties): 관계 유형 정의
+- schema_create_class(name, description, properties): 5계층 클래스 보정/업데이트
+- schema_create_relationship_type(name, from_class, to_class, description, properties): 허용 관계 정의 보정/업데이트
 - entity_search(class_name, search_criteria): 중복 확인을 위한 엔티티 검색 (반드시 생성 전에 호출!)
 - entity_create(class_name, properties, match_keys): 엔티티 인스턴스 생성 (MERGE로 중복 방지)
 - relationship_create(from_entity_id, to_entity_id, relationship_type, properties): 엔티티 간 관계 생성
 - neo4j_cypher(query, params): 고급 Cypher 쿼리 직접 실행
 - hybrid_search_chunks(query, top_k, target_node_ids, document_ids, chunk_refs, source_pages): OCR 청크에서 BM25 + 벡터 검색을 RRF로 결합한 근거 검색
+- project_graph_to_schema(name, description, domain): 현재 그래프를 저장용 OntologySchema JSON으로 투영
 
 ## 중요 규칙
+- 생성 가능한 클래스는 KPI, Measure, Driver, Process, Resource 5개뿐입니다.
+- 관계는 허용된 타입과 방향만 생성할 수 있습니다.
+- 모든 엔티티는 반드시 name, description, layer에 해당하는 class_name을 가져야 합니다.
+- 모든 엔티티에 가능하면 영어 embeddingTerms 5개 이상과 aliases를 속성으로 남기세요.
+- domain-layer 참조 구현의 원칙처럼, 새 노드 생성보다 기존 노드 재사용을 우선하세요.
+- 같은 underlying concept의 파생 표현(준수율, 리스크, 위반 확률, 초과율 등)은 별도 KPI 남발 없이 하나의 canonical node로 합치고 차이는 properties/aliases로 흡수하세요.
+- measurement_point, sample_point, unit이 물리적으로 다를 때만 별도 Measure로 유지하세요.
+- 기술 메타데이터(id, code, table, schema, column)는 standalone node로 만들지 말고 aliases나 properties로 흡수하세요.
+- `홍수기`, `비홍수기`, 시나리오, 운영 기준 같은 문맥/조건은 보통 Driver로, `수위`, `용량`, `빈도`, `비율`은 보통 Measure로, `기관/설비/댐/하천/제방`은 보통 Resource로 해석하세요.
+- 완벽한 전체 설계를 기다리지 말고, 근거 청크 1~2개로 특정 질문에 필요한 엔티티가 확인되면 즉시 entity_create를 호출해 점진적으로 그래프를 구축하세요.
+- 초기 그래프가 비어 있으면 hybrid_search_chunks를 여러 번 수동으로 반복하기보다 bootstrap_layered_ontology를 우선 사용해 핵심 엔티티 배치를 만든 뒤 세부 보강으로 들어가세요.
+- 검색만 반복하지 마세요. 연속 3회 이상 hybrid_search_chunks만 호출했다면, 그 시점까지 확보한 근거로 최소 2개 이상의 엔티티를 생성하거나 왜 생성 불가한지 판단해야 합니다.
 - 엔티티 생성 전 항상 entity_search로 기존 엔티티 확인하세요
 - 업로드 문서는 이미 OCR, 청킹, 임베딩, Document/Chunk 적재가 끝난 상태라고 가정하세요
 - execute나 파일 시스템 탐색으로 문서를 다시 파싱하지 마세요. 문서 탐색은 반드시 hybrid_search_chunks와 Neo4j 조회만 사용하세요
-- 스키마 클래스명은 영문 PascalCase (예: Person, Company, Accident)
-- 관계 유형명은 영문 UPPER_SNAKE_CASE (예: WORKS_AT, OCCURRED_AT)
-- entity_create 시 match_keys로 중복 방지 키를 지정하세요
+- entity_create 시 match_keys로 중복 방지 키를 지정하세요. 별도 지시가 없으면 id 기반 재사용을 우선하세요.
+- relationship_create에는 entity_create 또는 entity_search 결과의 `element_id`를 사용하세요.
 - 각 도구 호출 전에 한국어로 간단히 설명하세요
 - 멀티홉 질문이나 구축 의도가 보이면 먼저 그래프를 좁히고, 그 다음 관련 leaf에 대해 hybrid_search_chunks를 호출하세요
 - entity나 relationship를 생성할 때는 가능하면 chunk_ref, source_page, source_text를 속성으로 저장해 나중에 다시 검색 범위를 좁힐 수 있게 하세요
@@ -78,6 +108,8 @@ ONTOLOGY_BUILD_SYSTEM_PROMPT = """\
 - 온톨로지 구축 완료 기준은 "현재 그래프와 스키마만으로 Golden Question에 답할 수 있는가" 입니다
 - Golden Question에 충분히 답하지 못하면 스키마와 추출 결과를 추가로 보강하세요
 - 사용자가 이전 결과에 대해 틀렸다고 표시한 항목과 피드백을 받으면, 그 이유를 해결하도록 스키마와 추출 전략을 조정하세요
+- build 중 schema_create_class, schema_create_relationship_type는 5계층 스키마를 고정/보강할 때만 사용하세요. 자유로운 새 클래스 설계 용도로 사용하지 마세요.
+- build는 반드시 **search -> entity_create -> relationship_create**의 사이클을 반복해야 하며, search만 하고 종료해서는 안 됩니다.
 
 ## 최종 응답 형식
 - 사람이 읽는 한국어 요약을 먼저 작성하세요
@@ -104,7 +136,7 @@ ONTOLOGY_ANSWER_SYSTEM_PROMPT = """\
 한국어로 응답하세요. 당신은 Ontology Studio 질의 응답 에이전트입니다.
 
 ## 역할
-이미 구축된 온톨로지와 그래프를 조회하여, 사용자의 구체적인 질문에 정확하게 답변합니다.
+이미 구축된 5계층 온톨로지와 그래프를 조회하여, 사용자의 구체적인 질문에 정확하게 답변합니다.
 
 ## 핵심 원칙
 - 이 모드는 조회 전용입니다. 스키마, 엔티티, 관계를 생성/수정/삭제하지 마세요.
@@ -112,6 +144,8 @@ ONTOLOGY_ANSWER_SYSTEM_PROMPT = """\
 - 답변 전에 필요한 경우 schema_get, entity_search, neo4j_cypher_readonly, hybrid_search_chunks 도구로 근거를 확인하세요.
 - 온톨로지에 없는 내용은 추측하지 말고, 정보가 부족하다고 명확히 말하세요.
 - 사용자가 그래프를 바꾸거나 새 온톨로지를 만들고 싶다면 온톨로지 구축 모드로 전환하라고 안내하세요.
+- 질문은 가능하면 KPI, Measure, Driver, Process, Resource 5계층과 허용 관계를 기준으로 좁혀서 해석하세요.
+- 답변 전에 먼저 관련 엔티티를 그래프에서 좁히고, 마지막 근거 확인이 필요할 때만 hybrid_search_chunks를 호출하세요.
 
 ## 도구 사용 가이드
 - schema_get(): 현재 온톨로지 스키마와 관계 정의를 확인
@@ -128,6 +162,8 @@ ONTOLOGY_ANSWER_SYSTEM_PROMPT = """\
 
 _SENTINEL = object()
 _NEO4J_TOOL_NAMES = {
+    "bootstrap_layered_ontology",
+    "seed_layered_ontology_schema",
     "schema_create_class",
     "schema_create_relationship_type",
     "entity_create",
@@ -137,6 +173,8 @@ _NEO4J_TOOL_NAMES = {
 }
 
 _BUILD_MODE_TOOLS = [
+    seed_layered_ontology_schema,
+    bootstrap_layered_ontology,
     neo4j_cypher,
     schema_create_class,
     schema_create_relationship_type,
@@ -144,6 +182,7 @@ _BUILD_MODE_TOOLS = [
     entity_create,
     entity_search,
     relationship_create,
+    project_graph_to_schema,
     hybrid_search_chunks,
 ]
 
@@ -752,6 +791,11 @@ async def generate_sse(
                 "온톨로지 구축 전처리 시작... "
                 f"{len(build_context['golden_questions'])}개의 Golden Question 기준으로 준비합니다."
             )
+        seed_result = seed_layered_ontology_schema()
+        seed_payload = _parse_json_if_possible(seed_result)
+        if isinstance(seed_payload, dict) and seed_payload.get("error"):
+            yield _format_sse("error_event", {"message": str(seed_payload["error"])})
+            return
         yield _format_sse("status", {"message": status_message})
         current_preprocess_stage = "ocr"
         yield _format_sse("todos", {"items": _build_preprocessing_todos(current_preprocess_stage)})
