@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -14,6 +15,13 @@ from ...shared.kernel.settings import get_settings
 from ..files.service import list_local_upload_files
 from ..ontology.tools import get_driver
 from .ocr_service import PDFOCRService
+
+logger = logging.getLogger(__name__)
+
+_PDF_EXTENSIONS = {".pdf"}
+_TEXT_EXTENSIONS = {".txt", ".md", ".csv", ".tsv", ".log", ".json", ".yaml", ".yml", ".xml", ".html", ".htm", ".rst", ".ini", ".cfg", ".conf", ".py", ".js", ".java", ".c", ".cpp", ".h", ".go", ".rs", ".sql"}
+_DOCX_EXTENSIONS = {".docx"}
+_SUPPORTED_EXTENSIONS = _PDF_EXTENSIONS | _TEXT_EXTENSIONS | _DOCX_EXTENSIONS
 
 IndexingProgressCallback = Callable[[int, str, dict[str, Any] | None], Awaitable[None]]
 
@@ -42,7 +50,7 @@ class ChunkRecord:
 
 
 class DocumentIndexingService:
-    """Build document and chunk graph from uploaded PDFs."""
+    """Build document and chunk graph from uploaded documents."""
 
     def __init__(self, ocr_service: PDFOCRService | None = None) -> None:
         self._ocr_service = ocr_service or PDFOCRService()
@@ -73,19 +81,42 @@ class DocumentIndexingService:
             if path.suffix.lower() == ".pdf" and path.is_file()
         ]
 
-    async def ingest_uploaded_pdfs(
+    def list_uploaded_document_paths(self) -> list[Path]:
+        """Return all uploaded documents available for indexing."""
+
+        return [
+            path
+            for path in list_local_upload_files()
+            if path.is_file() and (
+                path.suffix.lower() in _SUPPORTED_EXTENSIONS
+                or self._is_likely_text_file(path)
+            )
+        ]
+
+    @staticmethod
+    def _is_likely_text_file(path: Path) -> bool:
+        """Heuristic check if a file is likely a text file."""
+        try:
+            with open(path, "rb") as f:
+                chunk = f.read(8192)
+            chunk.decode("utf-8")
+            return True
+        except (UnicodeDecodeError, OSError):
+            return False
+
+    async def ingest_uploaded_documents(
         self,
         on_progress: IndexingProgressCallback | None = None,
     ) -> dict[str, Any]:
-        """OCR, chunk, embed, and upload all uploaded PDFs."""
+        """Parse, chunk, embed, and upload all uploaded documents."""
 
-        pdf_paths = self.list_uploaded_pdf_paths()
-        if not pdf_paths:
-            raise ValueError("OCR 대상 PDF가 없습니다. 먼저 PDF를 업로드하세요.")
+        doc_paths = self.list_uploaded_document_paths()
+        if not doc_paths:
+            raise ValueError("인덱싱 대상 문서가 없습니다. 먼저 파일을 업로드하세요.")
 
         results = []
-        total_files = len(pdf_paths)
-        for file_index, pdf_path in enumerate(pdf_paths, start=1):
+        total_files = len(doc_paths)
+        for file_index, doc_path in enumerate(doc_paths, start=1):
             file_progress_start = self._scale_progress(0, 100, file_index - 1, total_files)
             file_progress_end = self._scale_progress(0, 100, file_index, total_files)
 
@@ -93,23 +124,156 @@ class DocumentIndexingService:
                 progress: int,
                 message: str,
                 detail: dict[str, Any] | None,
+                _doc_path=doc_path,
+                _file_index=file_index,
             ) -> None:
                 mapped_progress = file_progress_start + int(
                     ((file_progress_end - file_progress_start) * progress) / 100
                 )
                 payload = dict(detail or {})
-                payload["documentName"] = pdf_path.name
-                payload["documentIndex"] = file_index
+                payload["documentName"] = _doc_path.name
+                payload["documentIndex"] = _file_index
                 payload["documentTotal"] = total_files
                 await self._emit_progress(on_progress, mapped_progress, message, payload)
 
-            result = await self.ingest_pdf(pdf_path, on_progress=relay_progress)
+            suffix = doc_path.suffix.lower()
+            if suffix in _PDF_EXTENSIONS:
+                result = await self.ingest_pdf(doc_path, on_progress=relay_progress)
+            else:
+                result = await self.ingest_text_document(doc_path, on_progress=relay_progress)
             results.append(result)
 
         return {
             "documentCount": len(results),
             "documents": results,
         }
+
+    async def ingest_uploaded_pdfs(
+        self,
+        on_progress: IndexingProgressCallback | None = None,
+    ) -> dict[str, Any]:
+        """Legacy alias — delegates to ingest_uploaded_documents."""
+        return await self.ingest_uploaded_documents(on_progress=on_progress)
+
+    async def ingest_text_document(
+        self,
+        doc_path: str | Path,
+        on_progress: IndexingProgressCallback | None = None,
+    ) -> dict[str, Any]:
+        """Read, chunk, embed, and upload a non-PDF text document."""
+
+        path = Path(doc_path)
+        if not path.exists():
+            raise ValueError(f"파일을 찾을 수 없습니다: {path}")
+
+        await self._emit_progress(
+            on_progress, 5, f"문서 읽기 중: {path.name}",
+            {"stage": "ocr", "documentName": path.name},
+        )
+
+        text = self._read_document_text(path)
+        if not text.strip():
+            raise ValueError(f"문서에서 텍스트를 추출하지 못했습니다: {path.name}")
+
+        document_id = path.name
+        doc_sha256 = hashlib.sha256(path.read_bytes()).hexdigest()
+
+        # Build synthetic pages by splitting on double newlines or fixed size
+        pages = self._text_to_pages(text, page_size=4000)
+
+        await self._emit_progress(
+            on_progress, 50, f"청크 분할 및 임베딩 준비 중 ({len(pages)}페이지)",
+            {"stage": "embedding", "documentName": path.name},
+        )
+
+        chunk_payloads = self._build_chunk_payloads(document_id, path.name, pages)
+        embeddings = await self._embed_texts(
+            [chunk["source_text"] for chunk in chunk_payloads],
+            on_progress=on_progress,
+        )
+        chunk_records = [
+            ChunkRecord(**chunk, embedding=embedding)
+            for chunk, embedding in zip(chunk_payloads, embeddings, strict=True)
+        ]
+
+        await self._emit_progress(
+            on_progress, 90, "Neo4j에 문서 청크 업로드 중",
+            {"stage": "neo4j_upsert", "documentName": path.name},
+        )
+        self._upsert_document_graph(
+            document_id=document_id,
+            document_name=path.name,
+            source_path=str(path),
+            document_sha256=doc_sha256,
+            page_count=len(pages),
+            ocr_engine=None,
+            chunk_records=chunk_records,
+        )
+        return {
+            "documentId": document_id,
+            "documentName": path.name,
+            "documentSha256": doc_sha256,
+            "pageCount": len(pages),
+            "chunkCount": len(chunk_records),
+            "ocrAppliedPages": [],
+            "ocrCachedPages": [],
+            "ocrEngine": None,
+        }
+
+    @staticmethod
+    def _read_document_text(path: Path) -> str:
+        """Read text content from various file types."""
+        suffix = path.suffix.lower()
+
+        if suffix in _DOCX_EXTENSIONS:
+            try:
+                from docx import Document
+                doc = Document(str(path))
+                return "\n\n".join(p.text for p in doc.paragraphs if p.text.strip())
+            except ImportError:
+                logger.warning("python-docx not installed; trying as plain text")
+            except Exception as exc:
+                logger.warning("Failed to read docx %s: %s", path.name, exc)
+
+        # Default: read as UTF-8 text
+        encodings = ["utf-8", "cp949", "euc-kr", "latin-1"]
+        for encoding in encodings:
+            try:
+                return path.read_text(encoding=encoding)
+            except (UnicodeDecodeError, OSError):
+                continue
+        raise ValueError(f"파일 인코딩을 인식할 수 없습니다: {path.name}")
+
+    @staticmethod
+    def _text_to_pages(text: str, page_size: int = 4000) -> list[dict[str, Any]]:
+        """Split text into synthetic page dicts for the chunking pipeline."""
+        pages: list[dict[str, Any]] = []
+        # Try splitting by double newlines first for natural breaks
+        sections = [s.strip() for s in re.split(r"\n\s*\n", text) if s.strip()]
+        if not sections:
+            return []
+
+        current_text = ""
+        page_number = 1
+        for section in sections:
+            candidate = f"{current_text}\n\n{section}".strip() if current_text else section
+            if len(candidate) > page_size and current_text:
+                pages.append({
+                    "pageNumber": page_number,
+                    "text": current_text,
+                    "textHash": hashlib.sha256(current_text.encode("utf-8", errors="ignore")).hexdigest(),
+                })
+                page_number += 1
+                current_text = section
+            else:
+                current_text = candidate
+        if current_text:
+            pages.append({
+                "pageNumber": page_number,
+                "text": current_text,
+                "textHash": hashlib.sha256(current_text.encode("utf-8", errors="ignore")).hexdigest(),
+            })
+        return pages
 
     async def ingest_pdf(
         self,

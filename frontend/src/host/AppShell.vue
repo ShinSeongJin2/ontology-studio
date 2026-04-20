@@ -47,8 +47,30 @@
         </section>
       </div>
 
+      <section v-if="sessions.length > 0" class="session-list">
+        <h3>대화 기록</h3>
+        <ul>
+          <li
+            v-for="s in sessions"
+            :key="s.id"
+            class="session-item"
+            :class="{ active: s.id === sessionId }"
+            @click="switchSession(s.id)"
+          >
+            <span class="session-title">{{ s.title || '새 대화' }}</span>
+            <span class="session-date">{{ formatSessionDate(s.updated_at) }}</span>
+            <button
+              class="session-delete"
+              title="삭제"
+              @click.stop="deleteSession(s.id)"
+            >&times;</button>
+          </li>
+        </ul>
+      </section>
+
       <div class="sidebar-footer">
-        <button class="btn-reset" @click="resetSession">새 대화</button>
+        <button class="btn-reset" @click="handleNewSession">새 대화</button>
+        <button class="btn-reset btn-danger" @click="confirmClearNeo4j">Neo4j 전체 초기화</button>
       </div>
     </aside>
 
@@ -82,6 +104,7 @@
         @download="downloadFile"
         @send="send"
         @send-example="send"
+        @stop="stopStreaming"
         @submit-build-feedback="submitBuildFeedback"
       />
     </main>
@@ -130,7 +153,10 @@ const {
   buildIntent,
   canSend,
   canSubmitBuildFeedback,
+  clearNeo4jAll,
+  createNewSession,
   currentModeMeta,
+  deleteSession,
   doUploadAndNotify,
   downloadFile,
   effectiveInputPlaceholder,
@@ -152,12 +178,39 @@ const {
   resetSession,
   schema,
   send,
+  sessionId,
+  sessions,
   setBuildGoldenQuestion,
   setMode,
   showFilePanel,
   skills,
+  stopStreaming,
   submitBuildFeedback,
+  switchSession,
   todos,
   uploadedFiles,
 } = useOntologyStudio()
+
+function formatSessionDate(timestamp) {
+  if (!timestamp) return ''
+  const d = new Date(timestamp * 1000)
+  const now = new Date()
+  const isToday = d.toDateString() === now.toDateString()
+  if (isToday) {
+    return d.toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' })
+  }
+  return d.toLocaleDateString('ko-KR', { month: 'short', day: 'numeric' })
+}
+
+async function handleNewSession() {
+  await createNewSession()
+}
+
+async function confirmClearNeo4j() {
+  if (!confirm('Neo4j의 모든 데이터(스키마, 엔티티, 관계, 문서, 청크)가 삭제됩니다.\n정말 초기화하시겠습니까?')) {
+    return
+  }
+  await clearNeo4jAll()
+  await resetSession()
+}
 </script>

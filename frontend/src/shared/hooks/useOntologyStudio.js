@@ -1,7 +1,6 @@
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref } from 'vue'
 
 const API = import.meta.env.VITE_API_BASE || 'http://localhost:8000'
-const SESSION_ID = 'default'
 const DEFAULT_BUILD_PROMPT = '업로드된 문서를 바탕으로 Golden Question에 답할 수 있는 온톨로지를 구축해줘.'
 const DEFAULT_REVIEW_PROMPT = '방금 검토 피드백을 반영해서 Golden Question에 더 잘 답할 수 있도록 온톨로지를 개선해줘.'
 
@@ -99,6 +98,8 @@ export function useOntologyStudio() {
   const isStreaming = ref(false)
   const uploadedFiles = ref([])
   const outputFiles = ref([])
+  const sessionId = ref('default')
+  const sessions = ref([])
   const panelOpen = reactive({
     todos: true,
     context: true,
@@ -155,6 +156,7 @@ export function useOntologyStudio() {
   })
 
   let neo4jInterval = null
+  let activeEventSource = null
 
   function getModeState(targetMode = mode.value) {
     return modeState[targetMode]
@@ -284,10 +286,54 @@ export function useOntologyStudio() {
     return incorrectItems.length > 0 && incorrectItems.every((item) => item.feedback)
   }
 
+  function persistMessages(targetMode = mode.value) {
+    const state = getModeState(targetMode)
+    const serializable = state.messages.map((msg) => ({ ...msg }))
+    fetch(
+      `${API}/api/sessions/${encodeURIComponent(sessionId.value)}/messages?mode=${targetMode}`,
+      {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(serializable),
+      }
+    ).catch(() => {})
+  }
+
+  async function loadSessionMessages(targetSessionId) {
+    for (const m of MODE_KEYS) {
+      try {
+        const res = await fetch(
+          `${API}/api/sessions/${encodeURIComponent(targetSessionId)}/messages?mode=${m}`
+        )
+        const data = await res.json()
+        const state = getModeState(m)
+        if (data.messages?.length) {
+          replaceItems(state.messages, data.messages)
+          // Restore buildBrief from the first user message that has one
+          if (m === 'build' && state.buildBrief) {
+            const briefMsg = data.messages.find((msg) => msg.buildBrief)
+            if (briefMsg) {
+              state.buildBrief.intent = briefMsg.buildBrief.intent || ''
+              replaceItems(
+                state.buildBrief.goldenQuestions,
+                briefMsg.buildBrief.goldenQuestions?.length
+                  ? briefMsg.buildBrief.goldenQuestions
+                  : ['']
+              )
+            }
+          }
+        }
+      } catch {
+        // ignore
+      }
+    }
+    scrollBottom()
+  }
+
   function buildStreamUrl(prompt, currentMode, buildContext = null) {
     const url = new URL(`${API}/api/stream`)
     url.searchParams.set('prompt', prompt)
-    url.searchParams.set('session_id', SESSION_ID)
+    url.searchParams.set('session_id', sessionId.value)
     url.searchParams.set('mode', currentMode)
     if (buildContext) {
       url.searchParams.set('build_context', JSON.stringify(buildContext))
@@ -368,7 +414,7 @@ export function useOntologyStudio() {
       fd.append('files', file)
       names.push(file.name)
     }
-    fd.append('session_id', SESSION_ID)
+    fd.append('session_id', sessionId.value)
     await fetch(`${API}/api/upload`, { method: 'POST', body: fd })
     await refreshFiles()
     return names
@@ -412,6 +458,7 @@ export function useOntologyStudio() {
 
     let currentTokenIdx = -1
     const es = new EventSource(buildStreamUrl(prompt, currentMode, buildContext))
+    activeEventSource = es
 
     es.addEventListener('token', (event) => {
       const data = JSON.parse(event.data)
@@ -512,7 +559,9 @@ export function useOntologyStudio() {
       }
 
       isStreaming.value = false
+      activeEventSource = null
       es.close()
+      persistMessages(currentMode)
       refreshAll()
       scrollBottom()
     })
@@ -521,12 +570,14 @@ export function useOntologyStudio() {
       const data = JSON.parse(event.data)
       getAiMsg().steps.push({ type: 'token', text: `\n오류: ${data.message}` })
       isStreaming.value = false
+      activeEventSource = null
       es.close()
       scrollBottom()
     })
 
     es.onerror = () => {
       isStreaming.value = false
+      activeEventSource = null
       es.close()
       scrollBottom()
     }
@@ -541,17 +592,26 @@ export function useOntologyStudio() {
       return
     }
 
-    if (currentMode === 'build' && !isBuildBriefReady.value) {
+    // If there are already messages, this is a follow-up (e.g. "계속해")
+    const hasExistingMessages = state.messages.length > 0
+    const isFollowUp = currentMode === 'build' && hasExistingMessages
+
+    if (currentMode === 'build' && !isFollowUp && !isBuildBriefReady.value) {
       return
     }
 
-    const prompt = currentMode === 'build' ? rawText || DEFAULT_BUILD_PROMPT : rawText
+    const prompt = isFollowUp
+      ? rawText
+      : currentMode === 'build'
+        ? rawText || DEFAULT_BUILD_PROMPT
+        : rawText
     if (!prompt) {
       return
     }
 
-    const userMessage =
-      currentMode === 'build'
+    const userMessage = isFollowUp
+      ? { role: 'user', text: prompt, mode: currentMode }
+      : currentMode === 'build'
         ? {
             role: 'user',
             text: rawText || '구축 의도와 Golden Question을 기준으로 온톨로지 구축 시작',
@@ -571,8 +631,30 @@ export function useOntologyStudio() {
       currentMode,
       prompt,
       userMessage,
-      buildContext: currentMode === 'build' ? createBuildContext() : null,
+      // Don't send build context for follow-up messages
+      buildContext: currentMode === 'build' && !isFollowUp ? createBuildContext() : null,
     })
+  }
+
+  function stopStreaming() {
+    if (!isStreaming.value || !activeEventSource) {
+      return
+    }
+    activeEventSource.close()
+    activeEventSource = null
+    isStreaming.value = false
+
+    // Mark any running tool as stopped
+    const currentMessages = getModeState(mode.value).messages
+    if (currentMessages.length > 0) {
+      const lastMsg = currentMessages[currentMessages.length - 1]
+      if (lastMsg.role === 'assistant') {
+        lastMsg.steps.push({ type: 'token', text: '\n[중단됨] "계속해"를 입력하면 이어서 진행합니다.' })
+      }
+    }
+
+    persistMessages(mode.value)
+    scrollBottom()
   }
 
   async function submitBuildFeedback(message) {
@@ -595,7 +677,9 @@ export function useOntologyStudio() {
   }
 
   async function resetSession() {
-    await fetch(`${API}/api/session/reset`, { method: 'POST' })
+    await fetch(`${API}/api/session/reset?session_id=${encodeURIComponent(sessionId.value)}`, {
+      method: 'POST',
+    })
     uploadedFiles.value = []
     outputFiles.value = []
     for (const key of MODE_KEYS) {
@@ -604,7 +688,87 @@ export function useOntologyStudio() {
     await refreshSchema()
   }
 
+  async function fetchSessions() {
+    try {
+      const res = await fetch(`${API}/api/sessions`)
+      const data = await res.json()
+      sessions.value = data.sessions || []
+    } catch {
+      sessions.value = []
+    }
+  }
+
+  async function createNewSession(title = '') {
+    try {
+      const res = await fetch(`${API}/api/sessions?title=${encodeURIComponent(title)}`, {
+        method: 'POST',
+      })
+      const session = await res.json()
+      sessionId.value = session.id
+      for (const key of MODE_KEYS) {
+        resetModeState(key)
+      }
+      uploadedFiles.value = []
+      outputFiles.value = []
+      await fetchSessions()
+      await refreshAll()
+      return session
+    } catch {
+      return null
+    }
+  }
+
+  async function switchSession(targetSessionId) {
+    if (targetSessionId === sessionId.value || isStreaming.value) {
+      return
+    }
+    // Save current session messages before switching
+    for (const m of MODE_KEYS) {
+      if (getModeState(m).messages.length > 0) {
+        persistMessages(m)
+      }
+    }
+    sessionId.value = targetSessionId
+    for (const key of MODE_KEYS) {
+      resetModeState(key)
+    }
+    uploadedFiles.value = []
+    outputFiles.value = []
+    await loadSessionMessages(targetSessionId)
+    await refreshAll()
+  }
+
+  async function deleteSession(targetSessionId) {
+    try {
+      await fetch(`${API}/api/sessions/${encodeURIComponent(targetSessionId)}`, {
+        method: 'DELETE',
+      })
+      if (targetSessionId === sessionId.value) {
+        sessionId.value = 'default'
+        for (const key of MODE_KEYS) {
+          resetModeState(key)
+        }
+        uploadedFiles.value = []
+        outputFiles.value = []
+        await refreshAll()
+      }
+      await fetchSessions()
+    } catch {
+      // ignore
+    }
+  }
+
+  async function clearNeo4jAll() {
+    const res = await fetch(`${API}/api/neo4j/clear-all`, { method: 'POST' })
+    const data = await res.json()
+    if (data.status === 'ok') {
+      await refreshSchema()
+    }
+    return data
+  }
+
   onMounted(() => {
+    fetchSessions()
     refreshAll()
     neo4jInterval = setInterval(checkNeo4jStatus, 30000)
   })
@@ -622,12 +786,16 @@ export function useOntologyStudio() {
     buildIntent,
     canSend,
     canSubmitBuildFeedback,
+    clearNeo4jAll,
+    createNewSession,
     currentModeMeta,
+    deleteSession,
     doUploadAndNotify,
     downloadFile,
     effectiveInputPlaceholder,
     entityCounts,
     examples,
+    fetchSessions,
     inputText,
     isBuildBriefReady,
     isNeo4jTool,
@@ -644,11 +812,15 @@ export function useOntologyStudio() {
     resetSession,
     schema,
     send,
+    sessionId,
+    sessions,
     setBuildGoldenQuestion,
     setMode,
     showFilePanel,
     skills,
+    stopStreaming,
     submitBuildFeedback,
+    switchSession,
     todos,
     uploadedFiles,
   }

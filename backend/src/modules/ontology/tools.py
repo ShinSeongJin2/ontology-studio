@@ -64,8 +64,11 @@ def _node_to_dict(node) -> dict:
     return {"id": node.element_id, "labels": list(node.labels), **dict(node)}
 
 
-def _serialize_rows(rows: list[dict]) -> str:
-    """Serialize Neo4j rows into JSON-friendly dictionaries."""
+_MAX_TOOL_RESULT_CHARS = 3000  # max chars for serialized tool results
+
+
+def _serialize_rows(rows: list[dict], max_chars: int = _MAX_TOOL_RESULT_CHARS) -> str:
+    """Serialize Neo4j rows into JSON-friendly dictionaries, truncating if needed."""
 
     serialized = []
     for row in rows:
@@ -78,7 +81,10 @@ def _serialize_rows(rows: list[dict]) -> str:
             else:
                 serialized_row[key] = value
         serialized.append(serialized_row)
-    return json.dumps(serialized, ensure_ascii=False, default=str)
+    result = json.dumps(serialized, ensure_ascii=False, default=str)
+    if len(result) > max_chars:
+        return result[:max_chars] + '..."truncated"]'
+    return result
 
 
 def _is_readonly_cypher(query: str) -> bool:

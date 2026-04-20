@@ -34,6 +34,21 @@ async def get_schema_endpoint():
         return {"classes": [], "relationships": [], "error": str(exc)}
 
 
+@router.post("/api/neo4j/clear-all")
+async def clear_all_neo4j():
+    """Delete all ontology schema, entities, relationships, documents, and chunks."""
+
+    try:
+        driver = get_driver()
+        with driver.session() as session:
+            # Delete all relationships first, then all nodes
+            session.run("MATCH ()-[r]->() DELETE r")
+            session.run("MATCH (n) DETACH DELETE n")
+        return {"status": "ok", "message": "Neo4j 데이터가 모두 삭제되었습니다."}
+    except Exception as exc:  # pragma: no cover
+        return {"status": "error", "error": str(exc)}
+
+
 @router.get("/api/graph")
 async def get_graph(class_name: str = "", limit: int = 100):
     """Return graph nodes and edges, optionally filtered by class."""

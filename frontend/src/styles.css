@@ -592,6 +592,82 @@ body {
   border-top: 1px solid var(--border);
 }
 
+/* Session list */
+.session-list {
+  padding: 8px 12px;
+  border-top: 1px solid var(--border);
+  overflow-y: auto;
+  flex: 1;
+  min-height: 0;
+}
+
+.session-list h3 {
+  font-size: 11px;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  margin-bottom: 6px;
+  letter-spacing: 0.5px;
+}
+
+.session-list ul {
+  list-style: none;
+}
+
+.session-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--text-muted);
+  transition: background 0.15s;
+}
+
+.session-item:hover {
+  background: var(--surface2);
+  color: var(--text);
+}
+
+.session-item.active {
+  background: var(--surface2);
+  color: var(--accent);
+}
+
+.session-title {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-date {
+  font-size: 11px;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.session-delete {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 16px;
+  line-height: 1;
+  padding: 0 2px;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+
+.session-item:hover .session-delete {
+  opacity: 1;
+}
+
+.session-delete:hover {
+  color: #f85149;
+}
+
 .right-panel {
   width: 300px;
   background: var(--surface);
@@ -643,6 +719,23 @@ body {
 .btn-reset:hover {
   color: var(--text);
   border-color: var(--text-muted);
+}
+
+.btn-danger {
+  border-color: #c0392b;
+  color: #e74c3c;
+}
+
+.btn-danger:hover {
+  background: rgba(231, 76, 60, 0.15);
+  border-color: #e74c3c;
+  color: #ff6b6b;
+}
+
+.sidebar-footer {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
 }
 
 .workspace-main {
@@ -1530,4 +1623,24 @@ body {
 .btn-send:disabled {
   opacity: 0.3;
   cursor: not-allowed;
+}
+
+.btn-stop {
+  width: 36px;
+  height: 36px;
+  background: #f85149;
+  color: white;
+  border: none;
+  border-radius: 10px;
+  font-size: 0.9rem;
+  cursor: pointer;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s;
+}
+
+.btn-stop:hover {
+  background: #ff6b63;
 }

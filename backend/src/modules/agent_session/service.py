@@ -34,22 +34,50 @@ from ...shared.kernel.model_profiles import (
 )
 from ...shared.kernel.settings import get_settings
 from ...shared.sandbox.docker_backend import DockerSandboxBackend
+from .session_store import (
+    delete_session_messages as _db_delete_messages,
+    ensure_session as _db_ensure_session,
+    init_db as _db_init,
+    load_build_context as _db_load_build_context,
+    save_build_context as _db_save_build_context,
+    touch_session as _db_touch_session,
+)
 
 AgentMode = Literal["build", "answer"]
 
 _agents: dict[AgentMode, object] = {}
 _sessions: dict[str, list] = {}
 
+# --- SqliteSaver checkpointer (LangGraph native) ---
+_DB_PATH = Path(__file__).resolve().parents[3] / "data" / "sessions.db"
+
+def _get_checkpointer():
+    """Return a shared SqliteSaver checkpointer backed by SQLite."""
+    import sqlite3
+    from langgraph.checkpoint.sqlite import SqliteSaver
+
+    _DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(_DB_PATH), check_same_thread=False)
+    conn.execute("PRAGMA journal_mode=WAL")
+    return SqliteSaver(conn)
+
+# --- History management constants ---
+# Rough chars-to-tokens ratio for Korean text (conservative)
+_CHARS_PER_TOKEN = 2.5
+_MAX_HISTORY_TOKENS = 12000  # leave headroom for system prompt + new response
+_TOOL_RESULT_TRUNCATE_CHARS = 2000  # max chars kept per tool result in history
+_TOOL_RESULT_SUMMARY_SUFFIX = "\n... [결과가 잘렸습니다. 필요시 다시 조회하세요.]"
+
 ONTOLOGY_BUILD_SYSTEM_PROMPT = """\
 한국어로 응답하세요. 당신은 Ontology Studio 에이전트입니다.
 
 ## 역할
-사용자가 온톨로지 스키마를 설계하고, OCR + 하이브리드 검색으로 준비된 문서 청크를 근거로 엔티티와 관계를 추출하여 Neo4j에 저장하도록 돕습니다.
+사용자가 온톨로지 스키마를 설계하고, 업로드된 문서(PDF, 텍스트, DOCX 등 모든 유형)에서 추출·청킹된 문서 청크를 근거로 엔티티와 관계를 추출하여 Neo4j에 저장하도록 돕습니다.
 
 ## 작업 흐름
 1. **스키마 설계**: schema_create_class, schema_create_relationship_type 도구로 온톨로지 스키마를 정의
 2. **그래프 범위 파악**: schema_get, entity_search, neo4j_cypher로 현재 스키마/엔티티/관계를 파악
-3. **근거 검색**: hybrid_search_chunks로 OCR 청크를 검색하고, 필요하면 graph 탐색 결과의 node id를 target_node_ids로 넘겨 범위를 좁힘
+3. **근거 검색**: hybrid_search_chunks로 문서 청크를 검색하고, 필요하면 graph 탐색 결과의 node id를 target_node_ids로 넘겨 범위를 좁힘
 4. **중복 해결(Disambiguation)**: entity_search로 기존 엔티티를 검색하여 동일 엔티티는 재사용
 5. **관계 추출**: 엔티티 간 관계를 식별하고 relationship_create로 저장
 6. **출처 보존**: 엔티티/관계를 만들 때 가능한 한 source_text, chunk_ref, source_page, document_id 같은 근거 속성을 함께 남김
@@ -66,7 +94,7 @@ ONTOLOGY_BUILD_SYSTEM_PROMPT = """\
 
 ## 중요 규칙
 - 엔티티 생성 전 항상 entity_search로 기존 엔티티 확인하세요
-- 업로드 문서는 이미 OCR, 청킹, 임베딩, Document/Chunk 적재가 끝난 상태라고 가정하세요
+- 업로드 문서는 이미 텍스트 추출(PDF OCR 또는 직접 읽기), 청킹, 임베딩, Document/Chunk 적재가 끝난 상태라고 가정하세요
 - execute나 파일 시스템 탐색으로 문서를 다시 파싱하지 마세요. 문서 탐색은 반드시 hybrid_search_chunks와 Neo4j 조회만 사용하세요
 - 스키마 클래스명은 영문 PascalCase (예: Person, Company, Accident)
 - 관계 유형명은 영문 UPPER_SNAKE_CASE (예: WORKS_AT, OCCURRED_AT)
@@ -78,6 +106,14 @@ ONTOLOGY_BUILD_SYSTEM_PROMPT = """\
 - 온톨로지 구축 완료 기준은 "현재 그래프와 스키마만으로 Golden Question에 답할 수 있는가" 입니다
 - Golden Question에 충분히 답하지 못하면 스키마와 추출 결과를 추가로 보강하세요
 - 사용자가 이전 결과에 대해 틀렸다고 표시한 항목과 피드백을 받으면, 그 이유를 해결하도록 스키마와 추출 전략을 조정하세요
+
+## 컨텍스트 제약 대응 전략 (매우 중요)
+- LLM 컨텍스트 윈도우가 제한적이므로, 한 번에 모든 문서를 처리하려고 하지 마세요.
+- 반드시 다음 순서를 따르세요:
+  1. **스키마 설계 우선**: 먼저 hybrid_search_chunks로 문서 구조를 소량(top_k=3~5) 파악한 후, 스키마(클래스+관계)를 정의
+  2. **배치 추출**: 스키마 정의 후, hybrid_search_chunks를 소량(top_k=3~5)씩 호출하여 엔티티/관계를 반복 추출
+  3. **점진적 구축**: 한 번의 검색으로 모든 것을 추출하려 하지 말고, 주제/클래스별로 나눠 여러 번 검색하세요
+- hybrid_search_chunks의 top_k는 5 이하로 유지하세요. 많은 청크를 한번에 가져오면 토큰 초과가 발생합니다.
 
 ## 최종 응답 형식
 - 사람이 읽는 한국어 요약을 먼저 작성하세요
@@ -486,14 +522,25 @@ def _init_model(mode: AgentMode):
             "model": profile.model_name,
             "api_key": profile.api_key,
             "temperature": 0,
-            "reasoning_effort": profile.reasoning_effort,
             "use_responses_api": should_use_openai_responses_api(profile),
             "streaming": False,
         }
+        if profile.reasoning_effort and profile.reasoning_effort != "none":
+            kwargs["reasoning_effort"] = profile.reasoning_effort
         if profile.base_url:
             kwargs["base_url"] = profile.base_url
         return ChatOpenAI(**kwargs)
     return profile.raw_name
+
+
+_checkpointer = None
+
+def _get_shared_checkpointer():
+    """Return (and cache) the shared SqliteSaver instance."""
+    global _checkpointer
+    if _checkpointer is None:
+        _checkpointer = _get_checkpointer()
+    return _checkpointer
 
 
 def _create_build_agent():
@@ -511,6 +558,7 @@ def _create_build_agent():
         backend=backend,
         tools=_BUILD_MODE_TOOLS,
         system_prompt=ONTOLOGY_BUILD_SYSTEM_PROMPT,
+        checkpointer=_get_shared_checkpointer(),
     )
 
 
@@ -523,6 +571,7 @@ def _create_answer_agent():
         model=_init_model("answer"),
         tools=_ANSWER_MODE_TOOLS,
         system_prompt=ONTOLOGY_ANSWER_SYSTEM_PROMPT,
+        checkpointer=_get_shared_checkpointer(),
     )
 
 
@@ -537,6 +586,19 @@ def get_agent(mode: AgentMode = "build"):
     return _agents[mode]
 
 
+def _has_existing_checkpoint(session_id: str, mode: AgentMode) -> bool:
+    """Check if a previous checkpoint exists for this session+mode thread."""
+    try:
+        cp = _get_shared_checkpointer()
+        thread_id = _session_key(session_id, mode)
+        checkpoint = cp.get({"configurable": {"thread_id": thread_id}})
+        if checkpoint and checkpoint.get("channel_values", {}).get("messages"):
+            return len(checkpoint["channel_values"]["messages"]) > 0
+        return False
+    except Exception:
+        return False
+
+
 def _session_key(session_id: str, mode: AgentMode) -> str:
     """Return the in-memory session key for the mode-specific conversation."""
 
@@ -546,16 +608,35 @@ def _session_key(session_id: str, mode: AgentMode) -> str:
 def warm_up_agent() -> None:
     """Initialize agent dependencies eagerly on app startup."""
 
+    _db_init()
+    _get_shared_checkpointer().setup()
     get_agent("build")
     get_agent("answer")
     ensure_workspace_dirs()
 
 
 def clear_session(session_id: str) -> None:
-    """Drop in-memory history for a single session."""
+    """Drop checkpointed history and session metadata."""
 
     for mode in ("build", "answer"):
         _sessions.pop(_session_key(session_id, mode), None)
+    # Delete session metadata from our sessions table
+    _db_delete_messages(session_id)
+    # Delete LangGraph checkpointer data for this session's threads
+    try:
+        cp = _get_shared_checkpointer()
+        for m in ("build", "answer"):
+            thread_id = _session_key(session_id, m)
+            # SqliteSaver stores by thread_id; delete its checkpoints
+            cp.conn.execute(
+                "DELETE FROM checkpoints WHERE thread_id = ?", (thread_id,)
+            )
+            cp.conn.execute(
+                "DELETE FROM writes WHERE thread_id = ?", (thread_id,)
+            )
+        cp.conn.commit()
+    except Exception:
+        pass  # best-effort cleanup
 
 
 def _format_sse(event: str, data: dict) -> str:
@@ -565,7 +646,7 @@ def _format_sse(event: str, data: dict) -> str:
 
 def _build_preprocessing_todos(current_stage: str) -> list[dict[str, str]]:
     stages = [
-        ("ocr", "PDF OCR 처리"),
+        ("ocr", "문서 텍스트 추출"),
         ("embedding", "청크 임베딩 생성"),
         ("neo4j_upsert", "Neo4j 문서 그래프 업로드"),
         ("agent_build", "온톨로지 구축 에이전트 실행"),
@@ -636,6 +717,61 @@ def _emit_tool_side_effects(
     return events
 
 
+def _estimate_tokens(text: str) -> int:
+    """Rough token estimate from character count."""
+    return max(1, int(len(text) / _CHARS_PER_TOKEN))
+
+
+def _truncate_tool_content(content: str, max_chars: int = _TOOL_RESULT_TRUNCATE_CHARS) -> str:
+    """Truncate a tool result string to fit within budget."""
+    if len(content) <= max_chars:
+        return content
+    return content[:max_chars] + _TOOL_RESULT_SUMMARY_SUFFIX
+
+
+def _compress_history(messages: list, max_tokens: int = _MAX_HISTORY_TOKENS) -> list:
+    """Compress conversation history to fit within the token budget.
+
+    Strategy:
+    1. Always keep the last HumanMessage (current prompt).
+    2. Truncate large ToolMessage contents in older messages.
+    3. If still over budget, drop oldest message pairs from the front.
+    """
+    if not messages:
+        return messages
+
+    # Step 1: Truncate tool results in all but the last few messages
+    compressed = []
+    for msg in messages:
+        if isinstance(msg, ToolMessage):
+            content = msg.content if isinstance(msg.content, str) else str(msg.content)
+            truncated = _truncate_tool_content(content)
+            if truncated != content:
+                compressed.append(ToolMessage(
+                    content=truncated,
+                    tool_call_id=msg.tool_call_id,
+                    name=msg.name,
+                ))
+            else:
+                compressed.append(msg)
+        else:
+            compressed.append(msg)
+
+    # Step 2: Estimate total tokens and trim from front if needed
+    def _total_tokens(msgs):
+        total = 0
+        for m in msgs:
+            c = m.content if isinstance(m.content, str) else str(m.content)
+            total += _estimate_tokens(c)
+        return total
+
+    while len(compressed) > 1 and _total_tokens(compressed) > max_tokens:
+        # Remove the oldest message, but never remove the last one
+        compressed.pop(0)
+
+    return compressed
+
+
 def _run_agent_in_thread(
     prompt: str,
     session_id: str,
@@ -648,12 +784,11 @@ def _run_agent_in_thread(
 
     try:
         agent = get_agent(mode)
-        history_key = _session_key(session_id, mode)
-        if history_key not in _sessions:
-            _sessions[history_key] = []
-        history = _sessions[history_key]
-        history_length_before = len(history)
-        history.append(HumanMessage(content=prompt))
+        # Ensure session exists in the metadata DB
+        _db_ensure_session(session_id, title=prompt[:80])
+
+        # thread_id combines session_id and mode for checkpointer isolation
+        thread_id = _session_key(session_id, mode)
 
         model_profile = _resolve_agent_model_profile(mode)
         stream_modes = ["messages", "updates"] if not model_profile.uses_custom_base_url else ["updates"]
@@ -663,12 +798,14 @@ def _run_agent_in_thread(
             run_id=run_id,
             session_id=session_id,
             mode=mode,
-            history_length_before=history_length_before,
-            history_length_after=len(history),
             stream_modes=stream_modes,
         )
+        # SqliteSaver checkpointer automatically persists and restores history
+        # via thread_id — only send the new user message.
+        config = {"configurable": {"thread_id": thread_id}}
         for event_mode, payload in agent.stream(
-            {"messages": list(history)},
+            {"messages": [HumanMessage(content=prompt)]},
+            config=config,
             stream_mode=stream_modes,
         ):
             loop.call_soon_threadsafe(queue.put_nowait, (event_mode, payload))
@@ -703,8 +840,29 @@ async def generate_sse(
     """Yield streaming agent events as SSE messages."""
 
     build_context = _parse_build_context(raw_build_context if mode == "build" else "")
+    has_checkpoint = _has_existing_checkpoint(session_id, mode)
+    has_build_context = bool(
+        build_context.get("intent") or build_context.get("golden_questions")
+    )
+
+    # Save build_context on first request; restore on follow-ups
+    if mode == "build" and has_build_context:
+        _db_save_build_context(session_id, json.dumps(build_context, ensure_ascii=False))
+    elif mode == "build" and not has_build_context:
+        # Follow-up (e.g. "계속해") — restore saved context
+        saved = _db_load_build_context(session_id)
+        if saved:
+            build_context = _parse_build_context(saved)
+            has_build_context = True
+
+    is_continuation = has_checkpoint
+    # For continuation with checkpoint, send prompt as-is.
+    # For follow-up without checkpoint (interrupted during preprocessing),
+    # re-compose the full build prompt so the agent has context.
     effective_prompt = (
-        _compose_build_prompt(prompt, build_context) if mode == "build" else prompt
+        _compose_build_prompt(prompt, build_context)
+        if mode == "build" and not is_continuation
+        else prompt
     )
     settings = get_settings()
     model_profile = _resolve_agent_model_profile(mode)
@@ -746,78 +904,82 @@ async def generate_sse(
     assistant_text = ""
     mode_label = "온톨로지 구축" if mode == "build" else "질문 응답"
     if mode == "build":
-        status_message = "온톨로지 구축 전처리 시작..."
-        if build_context["golden_questions"]:
-            status_message = (
-                "온톨로지 구축 전처리 시작... "
-                f"{len(build_context['golden_questions'])}개의 Golden Question 기준으로 준비합니다."
-            )
-        yield _format_sse("status", {"message": status_message})
-        current_preprocess_stage = "ocr"
-        yield _format_sse("todos", {"items": _build_preprocessing_todos(current_preprocess_stage)})
-
-        preprocess_queue: asyncio.Queue = asyncio.Queue()
-
-        async def _on_preprocess_progress(
-            progress: int,
-            message: str,
-            detail: dict[str, Any] | None,
-        ) -> None:
-            await preprocess_queue.put(
-                {
-                    "progress": progress,
-                    "message": message,
-                    "detail": detail or {},
-                }
-            )
-
-        preprocess_task = asyncio.create_task(
-            _document_indexing_service.ingest_uploaded_pdfs(
-                on_progress=_on_preprocess_progress,
-            )
-        )
-
-        while True:
-            if preprocess_task.done() and preprocess_queue.empty():
-                break
-            try:
-                event = await asyncio.wait_for(preprocess_queue.get(), timeout=0.2)
-            except asyncio.TimeoutError:
-                continue
-            current_preprocess_stage = _resolve_preprocess_stage(event["detail"])
-            yield _format_sse("status", {"message": event["message"]})
-            yield _format_sse(
-                "preprocess_progress",
-                {
-                    "progress": event["progress"],
-                    "message": event["message"],
-                    **event["detail"],
-                },
-            )
+        if is_continuation:
+            # Skip preprocessing for continuation — documents already ingested
+            yield _format_sse("status", {"message": "이전 대화를 이어서 진행합니다..."})
+        else:
+            status_message = "온톨로지 구축 전처리 시작..."
+            if build_context["golden_questions"]:
+                status_message = (
+                    "온톨로지 구축 전처리 시작... "
+                    f"{len(build_context['golden_questions'])}개의 Golden Question 기준으로 준비합니다."
+                )
+            yield _format_sse("status", {"message": status_message})
+            current_preprocess_stage = "ocr"
             yield _format_sse("todos", {"items": _build_preprocessing_todos(current_preprocess_stage)})
 
-        try:
-            ingestion_summary = await preprocess_task
-        except Exception as exc:
-            run_failed = True
-            error_message = str(exc)
-            log_agent_event(
-                "ERROR",
-                "document_preprocessing_failed",
-                run_id=run_id,
-                session_id=session_id,
-                mode=mode,
-                error=error_message,
-            )
-            yield _format_sse("error_event", {"message": str(exc)})
-            return
+            preprocess_queue: asyncio.Queue = asyncio.Queue()
 
-        yield _format_sse(
-            "preprocess_complete",
-            {"summary": ingestion_summary},
-        )
-        yield _format_sse("todos", {"items": _build_preprocessing_todos("agent_build")})
-        yield _format_sse("status", {"message": "전처리 완료. 온톨로지 구축 에이전트를 시작합니다."})
+            async def _on_preprocess_progress(
+                progress: int,
+                message: str,
+                detail: dict[str, Any] | None,
+            ) -> None:
+                await preprocess_queue.put(
+                    {
+                        "progress": progress,
+                        "message": message,
+                        "detail": detail or {},
+                    }
+                )
+
+            preprocess_task = asyncio.create_task(
+                _document_indexing_service.ingest_uploaded_documents(
+                    on_progress=_on_preprocess_progress,
+                )
+            )
+
+            while True:
+                if preprocess_task.done() and preprocess_queue.empty():
+                    break
+                try:
+                    event = await asyncio.wait_for(preprocess_queue.get(), timeout=0.2)
+                except asyncio.TimeoutError:
+                    continue
+                current_preprocess_stage = _resolve_preprocess_stage(event["detail"])
+                yield _format_sse("status", {"message": event["message"]})
+                yield _format_sse(
+                    "preprocess_progress",
+                    {
+                        "progress": event["progress"],
+                        "message": event["message"],
+                        **event["detail"],
+                    },
+                )
+                yield _format_sse("todos", {"items": _build_preprocessing_todos(current_preprocess_stage)})
+
+            try:
+                ingestion_summary = await preprocess_task
+            except Exception as exc:
+                run_failed = True
+                error_message = str(exc)
+                log_agent_event(
+                    "ERROR",
+                    "document_preprocessing_failed",
+                    run_id=run_id,
+                    session_id=session_id,
+                    mode=mode,
+                    error=error_message,
+                )
+                yield _format_sse("error_event", {"message": str(exc)})
+                return
+
+            yield _format_sse(
+                "preprocess_complete",
+                {"summary": ingestion_summary},
+            )
+            yield _format_sse("todos", {"items": _build_preprocessing_todos("agent_build")})
+            yield _format_sse("status", {"message": "전처리 완료. 온톨로지 구축 에이전트를 시작합니다."})
     else:
         yield _format_sse("status", {"message": f"{mode_label} 모드 실행 시작..."})
 
@@ -1094,6 +1256,10 @@ async def generate_sse(
     if mode == "build":
         final_text, build_report = _extract_build_report(final_text, build_context)
 
+    # Touch session metadata timestamp (SqliteSaver handles message persistence)
+    if not run_failed:
+        _db_touch_session(session_id)
+
     total_elapsed_ms = int((time.perf_counter() - run_started_at) * 1000)
     completed_tool_runs = [
         tool_run for tool_run in tool_runs if tool_run.get("completed_at_ms") is not None
@@ -1151,7 +1317,7 @@ async def generate_sse(
             "todos",
             {
                 "items": [
-                    {"id": "ocr", "content": "PDF OCR 처리", "status": "completed"},
+                    {"id": "ocr", "content": "문서 텍스트 추출", "status": "completed"},
                     {"id": "embedding", "content": "청크 임베딩 생성", "status": "completed"},
                     {"id": "neo4j_upsert", "content": "Neo4j 문서 그래프 업로드", "status": "completed"},
                     {"id": "agent_build", "content": "온톨로지 구축 에이전트 실행", "status": "completed"},

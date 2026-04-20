@@ -164,6 +164,15 @@
           @keydown.enter.exact="onEnter"
         />
         <button
+          v-if="isStreaming"
+          class="btn-stop"
+          title="중단"
+          @click="$emit('stop')"
+        >
+          &#9724;
+        </button>
+        <button
+          v-else
           class="btn-send"
           :disabled="!canSend"
           @click="$emit('send')"
@@ -226,7 +235,7 @@ const props = defineProps({
   },
 })
 
-const emit = defineEmits(['download', 'send', 'send-example', 'submit-build-feedback'])
+const emit = defineEmits(['download', 'send', 'send-example', 'stop', 'submit-build-feedback'])
 
 function setBuildVerdict(message, index, verdict) {
   const item = message?.buildReport?.goldenQuestions?.[index]
