@@ -14,12 +14,12 @@ from typing import Any, Literal
 
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, ToolMessage
 
-from ..document_indexing.service import DocumentIndexingService
-from ..document_indexing.tools import hybrid_search_chunks
 from ..files.service import ensure_workspace_dirs, list_output_filenames
 from ..ontology.tools import (
+    batch_ingest,
     entity_create,
     entity_search,
+    graph_stats,
     neo4j_cypher,
     neo4j_cypher_readonly,
     relationship_create,
@@ -72,48 +72,97 @@ ONTOLOGY_BUILD_SYSTEM_PROMPT = """\
 한국어로 응답하세요. 당신은 Ontology Studio 에이전트입니다.
 
 ## 역할
-사용자가 온톨로지 스키마를 설계하고, 업로드된 문서(PDF, 텍스트, DOCX 등 모든 유형)에서 추출·청킹된 문서 청크를 근거로 엔티티와 관계를 추출하여 Neo4j에 저장하도록 돕습니다.
+사용자의 인텐트와 골든 퀘스천을 기반으로 온톨로지를 설계하고,
+업로드된 다양한 소스(PDF, Excel, Shapefile 등)에서 데이터를 추출하여
+Neo4j 지식그래프를 구축합니다. 검증 후 부족하면 반복합니다.
 
-## 작업 흐름
-1. **스키마 설계**: schema_create_class, schema_create_relationship_type 도구로 온톨로지 스키마를 정의
-2. **그래프 범위 파악**: schema_get, entity_search, neo4j_cypher로 현재 스키마/엔티티/관계를 파악
-3. **근거 검색**: hybrid_search_chunks로 문서 청크를 검색하고, 필요하면 graph 탐색 결과의 node id를 target_node_ids로 넘겨 범위를 좁힘
-4. **중복 해결(Disambiguation)**: entity_search로 기존 엔티티를 검색하여 동일 엔티티는 재사용
-5. **관계 추출**: 엔티티 간 관계를 식별하고 relationship_create로 저장
-6. **출처 보존**: 엔티티/관계를 만들 때 가능한 한 source_text, chunk_ref, source_page, document_id 같은 근거 속성을 함께 남김
+## 3가지 인제스천 패턴 (소스별로 자동 판별)
+
+**패턴 A — 문서 구조 → 노드** (보험약관, 계약서, 법률)
+문서의 계층 구조(관-조-항-호, 장-절 등) 자체가 노드가 됩니다.
+전략: 정규식 기반 구조 파싱, 계층(CONTAINS) + 상호참조(REFERENCES) 보존
+
+**패턴 B — 내용 추출 → 엔티티 + 관계** (프로세스 정의, 기술문서)
+문장 속에 여러 사실(엔티티, 관계)이 등장하여 의미를 추출해야 합니다.
+전략: 문장/단락 단위 NLP식 엔티티·관계 추출
+
+**패턴 C — 구조화 데이터 → 노드** (Excel 설비목록, Shapefile GIS, DB 덤프)
+행/레코드가 노드, 컬럼/필드가 속성, ID 컬럼이 관계의 연결고리입니다.
+전략: 컬럼/필드 직접 매핑, 물리적 ID·FK로 parent-child 및 관계 연결
+
+하나의 프로젝트에서 여러 패턴이 혼합될 수 있습니다.
+
+## 반복 워크플로우 (Phase 1 → 2 → 3, 검증 실패 시 반복)
+
+### Phase 1: 스키마 설계 (Intent-Driven, Top-Down)
+골든 퀘스천이 모든 것을 결정합니다.
+1. 인텐트와 골든 퀘스천을 분석합니다.
+2. 각 골든 퀘스천에 답하려면 어떤 클래스와 관계가 필요한지 도출합니다.
+3. schema_create_class, schema_create_relationship_type으로 스키마를 생성합니다.
+4. 각 질문별 예상 그래프 탐색 경로를 설계하고
+   /workspace/output/_schema_design.json에 저장합니다:
+   {"classes": [...], "relationships": [...],
+    "question_paths": [{"question": "Q", "path": "A-[REL]->B", "required_classes": [...]}]}
+
+### Phase 2: 소스 전략 수립 + 실행 (Data-Driven)
+1. 업로드된 **모든 파일**을 탐색합니다 (ls → execute로 샘플 추출).
+2. 각 파일별로 판단합니다:
+   - 파일 타입과 내부 구조 (PDF 계층? Excel 컬럼? Shapefile 레이어?)
+   - 어떤 패턴(A/B/C)이 적합한지
+   - 어떤 스키마 클래스를 채울 수 있는지
+   - 구체적 파싱 전략 (정규식 패턴, 컬럼 매핑, 추출 규칙)
+3. 파일별 파서 스크립트를 동적 생성하고 실행합니다:
+   - execute로 /workspace/output/_parser_{소스명}.py 작성
+   - 실행하여 /workspace/output/_parsed_{소스명}.json 출력
+   - 출력 포맷: {"nodes": [{"id","class","properties","parent_id"},...], "relationships": [{"from_id","to_id","type","properties"},...]}
+4. batch_ingest 도구로 파싱 결과를 Neo4j에 일괄 적재합니다.
+
+### Phase 3: 검증 (Question-Driven)
+1. graph_stats 도구로 전체 그래프 상태를 확인합니다 (클래스별 노드 수, 관계 유형별 수).
+2. 각 골든 퀘스천에 대해 **실제 Cypher 쿼리를 neo4j_cypher로 실행**하여 답변 가능 여부를 검증합니다.
+3. 검증 결과를 판단합니다:
+   - PASS: 질문에 답할 수 있는 노드와 관계가 충분히 존재
+   - FAIL: 누락된 클래스, 관계, 또는 데이터를 식별
+4. FAIL이 있으면:
+   - 스키마 갭 → Phase 1로 돌아가 클래스/관계 추가
+   - 데이터 갭 → Phase 2로 돌아가 추가 파싱 또는 파서 수정
+   - 최대 3회 반복합니다.
+5. 최종 리포트를 출력합니다:
+   - 노드/관계 통계
+   - 각 골든 퀘스천별 Cypher 쿼리와 답변 경로
+   - 검증 결과 (PASS/FAIL)
 
 ## 도구 사용 가이드
 - schema_get(): 현재 온톨로지 스키마 전체 조회
 - schema_create_class(name, description, properties): 새 클래스 정의
 - schema_create_relationship_type(name, from_class, to_class, description, properties): 관계 유형 정의
-- entity_search(class_name, search_criteria): 중복 확인을 위한 엔티티 검색 (반드시 생성 전에 호출!)
-- entity_create(class_name, properties, match_keys): 엔티티 인스턴스 생성 (MERGE로 중복 방지)
-- relationship_create(from_entity_id, to_entity_id, relationship_type, properties): 엔티티 간 관계 생성
-- neo4j_cypher(query, params): 고급 Cypher 쿼리 직접 실행
-- hybrid_search_chunks(query, top_k, target_node_ids, document_ids, chunk_refs, source_pages): OCR 청크에서 BM25 + 벡터 검색을 RRF로 결합한 근거 검색
+- entity_search(class_name, search_criteria): 중복 확인을 위한 엔티티 검색
+- entity_create(class_name, properties, match_keys): 엔티티 인스턴스 생성 (MERGE)
+- relationship_create(from_entity_id, to_entity_id, relationship_type, properties): 관계 생성
+- batch_ingest(nodes_json): 파싱 결과 파일 경로(예: "/workspace/output/_parsed_xxx.json")를 전달하면 노드+관계 일괄 생성. JSON 문자열을 직접 전달해도 됩니다. **컨텍스트 절약을 위해 파일 경로 전달을 권장합니다.**
+- graph_stats(): 그래프 전체 통계 조회 (검증용)
+- neo4j_cypher(query, params): Cypher 쿼리 직접 실행 (검증, 고급 조회)
+- execute: Python/bash 코드 실행 (파일 탐색, 파서 스크립트 생성·실행)
 
-## 중요 규칙
-- 엔티티 생성 전 항상 entity_search로 기존 엔티티 확인하세요
-- 업로드 문서는 이미 텍스트 추출(PDF OCR 또는 직접 읽기), 청킹, 임베딩, Document/Chunk 적재가 끝난 상태라고 가정하세요
-- execute나 파일 시스템 탐색으로 문서를 다시 파싱하지 마세요. 문서 탐색은 반드시 hybrid_search_chunks와 Neo4j 조회만 사용하세요
-- 스키마 클래스명은 영문 PascalCase (예: Person, Company, Accident)
-- 관계 유형명은 영문 UPPER_SNAKE_CASE (예: WORKS_AT, OCCURRED_AT)
-- entity_create 시 match_keys로 중복 방지 키를 지정하세요
-- 각 도구 호출 전에 한국어로 간단히 설명하세요
-- 멀티홉 질문이나 구축 의도가 보이면 먼저 그래프를 좁히고, 그 다음 관련 leaf에 대해 hybrid_search_chunks를 호출하세요
-- entity나 relationship를 생성할 때는 가능하면 chunk_ref, source_page, source_text를 속성으로 저장해 나중에 다시 검색 범위를 좁힐 수 있게 하세요
+## 소스 타입별 파싱 가이드
+- PDF: pdfplumber. 먼저 5-10페이지 샘플로 구조 파악 후 전체 파싱
+- Excel/XLSX: openpyxl. 헤더 먼저 읽기. 계층 데이터는 ID/Parent 컬럼으로 추적
+- Shapefile/DBF: dbfread 또는 struct로 직접 파싱. 속성 테이블→노드, 토폴로지→관계
+- Markdown/DOCX: 헤딩 기반 구조 파싱
+- PPTX: python-pptx. 슬라이드별 내용 추출
+
+## 핵심 규칙
+- **골든 퀘스천이 모든 것을 결정** — 스키마, 파싱 전략, 검증 기준
+- **모든 업로드 파일을 탐색한 후** 전략을 수립 (한 파일에 매몰되지 말 것)
+- **검증 시 반드시 실제 Cypher 실행** (경로 설명만으로는 불충분)
+- 파서 출력: 반드시 {"nodes": [...], "relationships": [...]} JSON
+- 스키마 클래스명: 영문 PascalCase / 관계 유형명: 영문 UPPER_SNAKE_CASE
+- content 필드: 2000자 이내로 자르기
+- 파일: /workspace/uploads/ 읽기, /workspace/output/ 쓰기
+- 각 단계 전에 한국어로 간단히 설명
+- 대규모 문서는 페이지/행 범위를 나눠서 처리
 - 사용자가 제공한 구축 의도(intent)와 Golden Question을 최우선 목표로 삼으세요
-- 온톨로지 구축 완료 기준은 "현재 그래프와 스키마만으로 Golden Question에 답할 수 있는가" 입니다
-- Golden Question에 충분히 답하지 못하면 스키마와 추출 결과를 추가로 보강하세요
 - 사용자가 이전 결과에 대해 틀렸다고 표시한 항목과 피드백을 받으면, 그 이유를 해결하도록 스키마와 추출 전략을 조정하세요
-
-## 컨텍스트 제약 대응 전략 (매우 중요)
-- LLM 컨텍스트 윈도우가 제한적이므로, 한 번에 모든 문서를 처리하려고 하지 마세요.
-- 반드시 다음 순서를 따르세요:
-  1. **스키마 설계 우선**: 먼저 hybrid_search_chunks로 문서 구조를 소량(top_k=3~5) 파악한 후, 스키마(클래스+관계)를 정의
-  2. **배치 추출**: 스키마 정의 후, hybrid_search_chunks를 소량(top_k=3~5)씩 호출하여 엔티티/관계를 반복 추출
-  3. **점진적 구축**: 한 번의 검색으로 모든 것을 추출하려 하지 말고, 주제/클래스별로 나눠 여러 번 검색하세요
-- hybrid_search_chunks의 top_k는 5 이하로 유지하세요. 많은 청크를 한번에 가져오면 토큰 초과가 발생합니다.
 
 ## 최종 응답 형식
 - 사람이 읽는 한국어 요약을 먼저 작성하세요
@@ -140,24 +189,23 @@ ONTOLOGY_ANSWER_SYSTEM_PROMPT = """\
 한국어로 응답하세요. 당신은 Ontology Studio 질의 응답 에이전트입니다.
 
 ## 역할
-이미 구축된 온톨로지와 그래프를 조회하여, 사용자의 구체적인 질문에 정확하게 답변합니다.
+이미 구축된 온톨로지와 지식그래프를 조회하여, 사용자의 질문에 정확하게 답변합니다.
 
 ## 핵심 원칙
 - 이 모드는 조회 전용입니다. 스키마, 엔티티, 관계를 생성/수정/삭제하지 마세요.
-- 문서를 다시 파싱하거나 파일 시스템을 탐색하려고 하지 마세요.
-- 답변 전에 필요한 경우 schema_get, entity_search, neo4j_cypher_readonly, hybrid_search_chunks 도구로 근거를 확인하세요.
+- 답변 전에 필요한 경우 schema_get, entity_search, neo4j_cypher_readonly, graph_stats 도구로 근거를 확인하세요.
 - 온톨로지에 없는 내용은 추측하지 말고, 정보가 부족하다고 명확히 말하세요.
 - 사용자가 그래프를 바꾸거나 새 온톨로지를 만들고 싶다면 온톨로지 구축 모드로 전환하라고 안내하세요.
 
 ## 도구 사용 가이드
 - schema_get(): 현재 온톨로지 스키마와 관계 정의를 확인
 - entity_search(class_name, search_criteria): 특정 클래스 엔티티를 조건으로 조회
-- neo4j_cypher_readonly(query, params): 읽기 전용 Cypher 조회. MATCH/OPTIONAL MATCH/WHERE/WITH/RETURN 중심으로 사용
-- hybrid_search_chunks(query, top_k, target_node_ids, document_ids, chunk_refs, source_pages): OCR 청크 기반 하이브리드 검색
+- neo4j_cypher_readonly(query, params): 읽기 전용 Cypher 조회
+- graph_stats(): 그래프 전체 통계 조회
 
 ## 답변 방식
 - 먼저 질문 의도를 짧게 정리한 뒤 필요한 조회를 수행하세요.
-- 멀티홉 질문이면 먼저 그래프를 좁히고, 필요한 경우 관련 node id를 target_node_ids로 넘겨 hybrid_search_chunks를 호출하세요.
+- 멀티홉 질문이면 Cypher로 경로를 탐색하세요.
 - 조회 결과를 바탕으로 간결하고 검증 가능한 답변을 작성하세요.
 - 필요한 경우 어떤 엔티티/관계/스키마 근거를 사용했는지 함께 설명하세요.
 """
@@ -180,14 +228,15 @@ _BUILD_MODE_TOOLS = [
     entity_create,
     entity_search,
     relationship_create,
-    hybrid_search_chunks,
+    batch_ingest,
+    graph_stats,
 ]
 
 _ANSWER_MODE_TOOLS = [
     schema_get,
     entity_search,
     neo4j_cypher_readonly,
-    hybrid_search_chunks,
+    graph_stats,
 ]
 
 _BUILD_REPORT_PATTERN = re.compile(
@@ -195,7 +244,6 @@ _BUILD_REPORT_PATTERN = re.compile(
     re.DOTALL,
 )
 _TEXT_CONTENT_BLOCK_TYPES = {"text", "output_text"}
-_document_indexing_service = DocumentIndexingService()
 
 
 def _parse_json_if_possible(value: str) -> Any | None:
@@ -547,6 +595,7 @@ def _create_build_agent():
     """Create the ontology construction agent with sandbox access."""
 
     from deepagents import create_deep_agent
+    from .tool_call_parser import ToolCallParserMiddleware
 
     settings = get_settings()
     backend = DockerSandboxBackend(
@@ -559,6 +608,7 @@ def _create_build_agent():
         tools=_BUILD_MODE_TOOLS,
         system_prompt=ONTOLOGY_BUILD_SYSTEM_PROMPT,
         checkpointer=_get_shared_checkpointer(),
+        middleware=[ToolCallParserMiddleware()],
     )
 
 
@@ -847,6 +897,7 @@ async def generate_sse(
 
     # Save build_context on first request; restore on follow-ups
     if mode == "build" and has_build_context:
+        _db_ensure_session(session_id, title=prompt[:80])
         _db_save_build_context(session_id, json.dumps(build_context, ensure_ascii=False))
     elif mode == "build" and not has_build_context:
         # Follow-up (e.g. "계속해") — restore saved context
@@ -905,81 +956,11 @@ async def generate_sse(
     mode_label = "온톨로지 구축" if mode == "build" else "질문 응답"
     if mode == "build":
         if is_continuation:
-            # Skip preprocessing for continuation — documents already ingested
             yield _format_sse("status", {"message": "이전 대화를 이어서 진행합니다..."})
         else:
-            status_message = "온톨로지 구축 전처리 시작..."
-            if build_context["golden_questions"]:
-                status_message = (
-                    "온톨로지 구축 전처리 시작... "
-                    f"{len(build_context['golden_questions'])}개의 Golden Question 기준으로 준비합니다."
-                )
+            gq_count = len(build_context["golden_questions"]) if build_context["golden_questions"] else 0
+            status_message = f"온톨로지 구축 에이전트를 시작합니다... ({gq_count}개 Golden Question)"
             yield _format_sse("status", {"message": status_message})
-            current_preprocess_stage = "ocr"
-            yield _format_sse("todos", {"items": _build_preprocessing_todos(current_preprocess_stage)})
-
-            preprocess_queue: asyncio.Queue = asyncio.Queue()
-
-            async def _on_preprocess_progress(
-                progress: int,
-                message: str,
-                detail: dict[str, Any] | None,
-            ) -> None:
-                await preprocess_queue.put(
-                    {
-                        "progress": progress,
-                        "message": message,
-                        "detail": detail or {},
-                    }
-                )
-
-            preprocess_task = asyncio.create_task(
-                _document_indexing_service.ingest_uploaded_documents(
-                    on_progress=_on_preprocess_progress,
-                )
-            )
-
-            while True:
-                if preprocess_task.done() and preprocess_queue.empty():
-                    break
-                try:
-                    event = await asyncio.wait_for(preprocess_queue.get(), timeout=0.2)
-                except asyncio.TimeoutError:
-                    continue
-                current_preprocess_stage = _resolve_preprocess_stage(event["detail"])
-                yield _format_sse("status", {"message": event["message"]})
-                yield _format_sse(
-                    "preprocess_progress",
-                    {
-                        "progress": event["progress"],
-                        "message": event["message"],
-                        **event["detail"],
-                    },
-                )
-                yield _format_sse("todos", {"items": _build_preprocessing_todos(current_preprocess_stage)})
-
-            try:
-                ingestion_summary = await preprocess_task
-            except Exception as exc:
-                run_failed = True
-                error_message = str(exc)
-                log_agent_event(
-                    "ERROR",
-                    "document_preprocessing_failed",
-                    run_id=run_id,
-                    session_id=session_id,
-                    mode=mode,
-                    error=error_message,
-                )
-                yield _format_sse("error_event", {"message": str(exc)})
-                return
-
-            yield _format_sse(
-                "preprocess_complete",
-                {"summary": ingestion_summary},
-            )
-            yield _format_sse("todos", {"items": _build_preprocessing_todos("agent_build")})
-            yield _format_sse("status", {"message": "전처리 완료. 온톨로지 구축 에이전트를 시작합니다."})
     else:
         yield _format_sse("status", {"message": f"{mode_label} 모드 실행 시작..."})
 
@@ -1317,10 +1298,9 @@ async def generate_sse(
             "todos",
             {
                 "items": [
-                    {"id": "ocr", "content": "문서 텍스트 추출", "status": "completed"},
-                    {"id": "embedding", "content": "청크 임베딩 생성", "status": "completed"},
-                    {"id": "neo4j_upsert", "content": "Neo4j 문서 그래프 업로드", "status": "completed"},
-                    {"id": "agent_build", "content": "온톨로지 구축 에이전트 실행", "status": "completed"},
+                    {"id": "schema_design", "content": "Phase 1: 스키마 설계", "status": "completed"},
+                    {"id": "data_ingest", "content": "Phase 2: 소스 파싱 + 적재", "status": "completed"},
+                    {"id": "validation", "content": "Phase 3: 검증", "status": "completed"},
                 ]
             },
         )

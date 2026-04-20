@@ -446,3 +446,150 @@ def relationship_create(
         return json.dumps({"status": "ok"}, ensure_ascii=False)
     except Exception as exc:  # pragma: no cover - passthrough error handling
         return json.dumps({"error": str(exc)}, ensure_ascii=False)
+
+
+def batch_ingest(nodes_json: str) -> str:
+    """Batch-ingest nodes and relationships from a parsed JSON file path or JSON string containing nodes and relationships arrays."""
+
+    import os
+    from pathlib import Path
+
+    try:
+        data_str = nodes_json.strip()
+
+        # If it looks like a file path, read the file
+        if not data_str.startswith("{") and not data_str.startswith("["):
+            file_path = Path(data_str)
+            if not file_path.exists():
+                return json.dumps({"error": f"파일을 찾을 수 없습니다: {data_str}"}, ensure_ascii=False)
+            data_str = file_path.read_text(encoding="utf-8")
+
+        data = json.loads(data_str)
+        nodes = data.get("nodes", [])
+        relationships = data.get("relationships", [])
+
+        node_count = 0
+        rel_count = 0
+        errors = []
+
+        # Ingest nodes
+        for node in nodes:
+            node_id = node.get("id", "")
+            class_name = node.get("class", "")
+            props = node.get("properties", {})
+            parent_id = node.get("parent_id")
+
+            if not class_name:
+                errors.append(f"노드에 class가 없습니다: {node_id}")
+                continue
+
+            # Truncate content fields
+            for key in list(props.keys()):
+                if isinstance(props[key], str) and len(props[key]) > 2000:
+                    props[key] = props[key][:2000] + "..."
+
+            props["_source_id"] = node_id
+            if parent_id:
+                props["_parent_source_id"] = parent_id
+
+            merge_clause = "_source_id: $_source_id"
+            set_parts = ", ".join(f"n.{k} = ${k}" for k in props.keys())
+
+            query = f"""
+            MERGE (n:_Entity:{class_name} {{ {merge_clause} }})
+            ON CREATE SET n.created_at = datetime()
+            SET {set_parts}, n.updated_at = datetime()
+            RETURN n
+            """
+            try:
+                _run_query(query, props)
+                node_count += 1
+            except Exception as exc:
+                errors.append(f"노드 {node_id}: {exc}")
+
+        # Ingest parent-child CONTAINS relationships
+        for node in nodes:
+            parent_id = node.get("parent_id")
+            if not parent_id:
+                continue
+            try:
+                _run_query(
+                    """
+                    MATCH (parent:_Entity {_source_id: $parent_id})
+                    MATCH (child:_Entity {_source_id: $child_id})
+                    MERGE (parent)-[r:CONTAINS]->(child)
+                    ON CREATE SET r.created_at = datetime()
+                    SET r.updated_at = datetime()
+                    """,
+                    {"parent_id": parent_id, "child_id": node["id"]},
+                )
+                rel_count += 1
+            except Exception as exc:
+                errors.append(f"CONTAINS {parent_id}->{node['id']}: {exc}")
+
+        # Ingest explicit relationships
+        for rel in relationships:
+            from_id = rel.get("from_id", "")
+            to_id = rel.get("to_id", "")
+            rel_type = rel.get("type", "RELATED_TO")
+            rel_props = rel.get("properties", {})
+
+            set_clause = ""
+            if rel_props:
+                assignments = [f"r.{k} = ${k}" for k in rel_props.keys()]
+                set_clause = ", " + ", ".join(assignments)
+
+            try:
+                _run_query(
+                    f"""
+                    MATCH (a:_Entity {{_source_id: $from_id}})
+                    MATCH (b:_Entity {{_source_id: $to_id}})
+                    MERGE (a)-[r:{rel_type}]->(b)
+                    ON CREATE SET r.created_at = datetime()
+                    SET r.updated_at = datetime(){set_clause}
+                    """,
+                    {"from_id": from_id, "to_id": to_id, **rel_props},
+                )
+                rel_count += 1
+            except Exception as exc:
+                errors.append(f"관계 {from_id}-[{rel_type}]->{to_id}: {exc}")
+
+        result = {
+            "status": "ok",
+            "nodes_created": node_count,
+            "relationships_created": rel_count,
+        }
+        if errors:
+            result["errors"] = errors[:20]  # limit error output
+        return json.dumps(result, ensure_ascii=False)
+    except Exception as exc:
+        return json.dumps({"error": str(exc)}, ensure_ascii=False)
+
+
+def graph_stats() -> str:
+    """Return graph-wide statistics: node counts by class, relationship counts by type."""
+
+    try:
+        node_stats = _run_readonly_query("""
+            MATCH (n:_Entity)
+            WITH [l IN labels(n) WHERE l <> '_Entity'] AS entity_labels
+            UNWIND entity_labels AS label
+            RETURN label AS class, count(*) AS count
+            ORDER BY count DESC
+        """)
+        rel_stats = _run_readonly_query("""
+            MATCH (:_Entity)-[r]->(:_Entity)
+            RETURN type(r) AS type, count(*) AS count
+            ORDER BY count DESC
+        """)
+        total_nodes = _run_readonly_query("MATCH (n:_Entity) RETURN count(n) AS total")
+        total_rels = _run_readonly_query("MATCH (:_Entity)-[r]->(:_Entity) RETURN count(r) AS total")
+
+        return json.dumps({
+            "total_nodes": total_nodes[0]["total"] if total_nodes else 0,
+            "total_relationships": total_rels[0]["total"] if total_rels else 0,
+            "nodes_by_class": [{"class": r["class"], "count": r["count"]} for r in node_stats],
+            "relationships_by_type": [{"type": r["type"], "count": r["count"]} for r in rel_stats],
+        }, ensure_ascii=False)
+    except Exception as exc:
+        return json.dumps({"error": str(exc)}, ensure_ascii=False)
