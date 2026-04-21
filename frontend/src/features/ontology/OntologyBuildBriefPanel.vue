@@ -11,6 +11,29 @@
         </div>
 
         <div class="build-brief-form">
+          <div class="build-brief-field">
+            <span>파일</span>
+            <div
+              class="build-upload-zone"
+              :class="{ 'drag-active': dragOver }"
+              @dragover.prevent="dragOver = true"
+              @dragleave="dragOver = false"
+              @drop.prevent="handleDrop"
+              @click="docFileInput?.click()"
+            >
+              <input ref="docFileInput" type="file" hidden multiple @change="handleDocSelect" />
+              <div v-if="!uploadedFiles.length" class="build-upload-placeholder">
+                + 파일 업로드 (드래그 앤 드롭 가능)
+              </div>
+              <div v-else class="build-upload-file-list">
+                <span v-for="f in uploadedFiles" :key="f.name" class="build-upload-chip">
+                  {{ f.name }} <span class="build-upload-size">{{ f.size }}</span>
+                </span>
+                <span class="build-upload-add">+ 추가</span>
+              </div>
+            </div>
+          </div>
+
           <label class="build-brief-field">
             <span>구축 의도</span>
             <textarea
@@ -106,6 +129,10 @@ defineProps({
     type: Boolean,
     required: true,
   },
+  uploadedFiles: {
+    type: Array,
+    default: () => [],
+  },
 })
 
 const emit = defineEmits([
@@ -115,9 +142,26 @@ const emit = defineEmits([
   'start-build',
   'update:intent',
   'update:question',
+  'upload',
 ])
 
 const fileInputRef = ref(null)
+const docFileInput = ref(null)
+const dragOver = ref(false)
+
+function handleDocSelect(event) {
+  if (event.target.files?.length) {
+    emit('upload', event.target.files)
+  }
+  event.target.value = ''
+}
+
+function handleDrop(event) {
+  dragOver.value = false
+  if (event.dataTransfer.files?.length) {
+    emit('upload', event.dataTransfer.files)
+  }
+}
 
 function triggerFileUpload() {
   fileInputRef.value?.click()

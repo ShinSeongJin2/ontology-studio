@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
+import tiktoken
+
 from ...shared.kernel.model_profiles import resolve_model_profile
 from ...shared.kernel.settings import get_settings
 from ..files.service import list_local_upload_files
@@ -27,6 +29,8 @@ IndexingProgressCallback = Callable[[int, str, dict[str, Any] | None], Awaitable
 
 DEFAULT_CHUNK_SIZE = 1200
 DEFAULT_CHUNK_OVERLAP = 150
+
+_tokenizer = tiktoken.get_encoding("cl100k_base")
 CHUNK_FULLTEXT_INDEX_NAME = "chunk_source_text_fulltext"
 CHUNK_VECTOR_INDEX_NAME = "chunk_embedding_vector"
 
@@ -376,32 +380,43 @@ class DocumentIndexingService:
         return chunk_payloads
 
     def _split_text(self, text: str) -> list[str]:
+        max_tokens = get_settings().embedding_chunk_max_tokens
+        overlap_tokens = max(max_tokens // 8, 20)
+
         blocks = [part.strip() for part in re.split(r"\n\s*\n", text) if part.strip()]
         if not blocks:
             return []
 
         chunks: list[str] = []
         current = ""
+        current_tokens = 0
         for block in blocks:
+            block_tokens = len(_tokenizer.encode(block))
             candidate = f"{current}\n\n{block}".strip() if current else block
-            if len(candidate) <= DEFAULT_CHUNK_SIZE:
+            candidate_tokens = current_tokens + block_tokens + (2 if current else 0)
+            if candidate_tokens <= max_tokens:
                 current = candidate
+                current_tokens = candidate_tokens
                 continue
             if current:
                 chunks.append(current)
-            if len(block) <= DEFAULT_CHUNK_SIZE:
+            if block_tokens <= max_tokens:
                 current = block
+                current_tokens = block_tokens
                 continue
+            # Block exceeds max_tokens — split by tokens
+            token_ids = _tokenizer.encode(block)
             start = 0
-            while start < len(block):
-                end = min(len(block), start + DEFAULT_CHUNK_SIZE)
-                piece = block[start:end].strip()
+            while start < len(token_ids):
+                end = min(len(token_ids), start + max_tokens)
+                piece = _tokenizer.decode(token_ids[start:end]).strip()
                 if piece:
                     chunks.append(piece)
-                if end >= len(block):
+                if end >= len(token_ids):
                     break
-                start = max(end - DEFAULT_CHUNK_OVERLAP, start + 1)
+                start = max(end - overlap_tokens, start + 1)
             current = ""
+            current_tokens = 0
         if current:
             chunks.append(current)
         return chunks
@@ -435,7 +450,7 @@ class DocumentIndexingService:
             {"stage": "embedding", "chunkCount": len(texts)},
         )
 
-        batch_size = 32
+        batch_size = 5
         embeddings: list[list[float]] = []
         for offset in range(0, len(texts), batch_size):
             batch = texts[offset : offset + batch_size]
@@ -458,12 +473,20 @@ class DocumentIndexingService:
     ) -> list[list[float]]:
         from openai import OpenAI
 
+        max_tokens = get_settings().embedding_chunk_max_tokens
+        truncated = []
+        for t in texts:
+            ids = _tokenizer.encode(t)
+            if len(ids) > max_tokens:
+                t = _tokenizer.decode(ids[:max_tokens])
+            truncated.append(t)
+
         client_kwargs: dict[str, Any] = {
             "api_key": api_key,
             "base_url": base_url or "https://api.openai.com/v1",
         }
         client = OpenAI(**client_kwargs)
-        response = client.embeddings.create(model=model_name, input=texts)
+        response = client.embeddings.create(model=model_name, input=truncated)
         return [list(item.embedding) for item in response.data]
 
     def _upsert_document_graph(

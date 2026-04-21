@@ -109,6 +109,8 @@ export function useOntologyStudio() {
   const neo4jConnected = ref(false)
   const schema = ref({ classes: [], relationships: [] })
   const entityCounts = ref([])
+  const graphData = ref({ nodes: [], edges: [] })
+  const traversedNodeIds = ref([])
   const currentModeMeta = computed(() => MODES[mode.value])
   const inputText = computed({
     get: () => modeState[mode.value].draft,
@@ -122,6 +124,8 @@ export function useOntologyStudio() {
   const refFiles = computed(() => modeState[mode.value].refFiles)
   const examples = computed(() => currentModeMeta.value.examples)
   const showFilePanel = computed(() => currentModeMeta.value.allowsFiles)
+  const buildSessions = computed(() => sessions.value.filter(s => s.mode !== 'answer'))
+  const answerSessions = computed(() => sessions.value.filter(s => s.mode === 'answer'))
   const buildBrief = computed(() => modeState.build.buildBrief)
   const buildIntent = computed({
     get: () => buildBrief.value.intent,
@@ -193,7 +197,25 @@ export function useOntologyStudio() {
   }
 
   function setMode(nextMode) {
-    if (!MODES[nextMode] || nextMode === mode.value || isStreaming.value) {
+    if (!MODES[nextMode] || isStreaming.value) {
+      return
+    }
+    if (nextMode === mode.value) {
+      // Same mode clicked again → start a fresh blank session locally
+      // Persist current messages before clearing
+      const currentState = getModeState(nextMode)
+      if (currentState.messages.length > 0) {
+        persistMessages(nextMode)
+      }
+      // Generate a local pending ID (will be created on first send)
+      const pendingId = `pending_${Date.now()}`
+      sessionId.value = pendingId
+      for (const key of MODE_KEYS) {
+        resetModeState(key)
+      }
+      uploadedFiles.value = []
+      outputFiles.value = []
+      traversedNodeIds.value = []
       return
     }
     mode.value = nextMode
@@ -287,6 +309,7 @@ export function useOntologyStudio() {
   }
 
   function persistMessages(targetMode = mode.value) {
+    if (sessionId.value.startsWith('pending_')) return
     const state = getModeState(targetMode)
     // Deep clone to ensure nested objects (steps, args, buildReport) are serialized
     const serializable = JSON.parse(JSON.stringify(state.messages))
@@ -323,12 +346,47 @@ export function useOntologyStudio() {
               )
             }
           }
+          // Restore traversed node IDs from answer mode tool results
+          if (m === 'answer') {
+            traversedNodeIds.value = extractTraversedNodeIds(data.messages)
+          }
         }
       } catch {
         // ignore
       }
     }
     scrollBottom()
+  }
+
+  function extractTraversedNodeIds(messages) {
+    const ids = []
+    for (const msg of messages) {
+      if (msg.role !== 'assistant') continue
+      for (const step of msg.steps || []) {
+        if (step.type !== 'tool_result') continue
+        try {
+          const items = JSON.parse(step.content)
+          const list = Array.isArray(items) ? items : [items]
+          for (const item of list) {
+            if (!item || typeof item !== 'object') continue
+            // vector_search: node_id field
+            if (item.node_id) ids.push(item.node_id)
+            // entity_search / cypher: id field (element_id format "4:uuid:num")
+            else if (item.id && typeof item.id === 'string' && item.id.includes(':')) ids.push(item.id)
+            // nested node dicts in cypher results
+            for (const val of Object.values(item)) {
+              if (val && typeof val === 'object' && val.id && typeof val.id === 'string' && val.id.includes(':')) {
+                ids.push(val.id)
+              }
+            }
+          }
+        } catch {
+          // not JSON, skip
+        }
+      }
+    }
+    // dedupe preserving order
+    return [...new Set(ids)]
   }
 
   function buildStreamUrl(prompt, currentMode, buildContext = null) {
@@ -375,6 +433,18 @@ export function useOntologyStudio() {
     }
   }
 
+  async function fetchGraphData(className = '', limit = 200) {
+    try {
+      const params = new URLSearchParams()
+      if (className) params.set('class_name', className)
+      params.set('limit', String(limit))
+      const res = await fetch(`${API}/api/graph?${params}`)
+      graphData.value = await res.json()
+    } catch {
+      graphData.value = { nodes: [], edges: [] }
+    }
+  }
+
   async function refreshSchema() {
     try {
       const res = await fetch(`${API}/api/schema`)
@@ -384,6 +454,7 @@ export function useOntologyStudio() {
         relationships: data.relationships || [],
       }
       await refreshEntityCounts()
+      await fetchGraphData()
     } catch {
       // ignore
     }
@@ -426,6 +497,7 @@ export function useOntologyStudio() {
       return
     }
 
+    await ensureSessionOnServer()
     const names = await uploadFiles(fileList)
     const shouldNotifyInChat = mode.value !== 'build' || getModeState().messages.length > 0
     if (names.length && shouldNotifyInChat) {
@@ -442,11 +514,39 @@ export function useOntologyStudio() {
     window.open(`${API}/api/download/${encodeURIComponent(name)}`, '_blank')
   }
 
+  function autoUpdateSessionTitle(currentMode, prompt) {
+    // Count total user messages across all modes
+    const totalUserMsgs = MODE_KEYS.reduce(
+      (sum, m) => sum + getModeState(m).messages.filter(msg => msg.role === 'user').length,
+      0
+    )
+    // Only set title on the very first user message of the session
+    if (totalUserMsgs === 1 && prompt) {
+      const title = prompt.length > 30 ? prompt.slice(0, 30) + '...' : prompt
+      fetch(
+        `${API}/api/sessions/${encodeURIComponent(sessionId.value)}?title=${encodeURIComponent(title)}`,
+        { method: 'PATCH' }
+      ).then(() => fetchSessions()).catch(() => {})
+    }
+  }
+
+  async function ensureSessionOnServer() {
+    if (sessionId.value.startsWith('pending_')) {
+      const currentMode = mode.value
+      const params = new URLSearchParams({ title: '새 대화', mode: currentMode })
+      const res = await fetch(`${API}/api/sessions?${params}`, { method: 'POST' })
+      const session = await res.json()
+      sessionId.value = session.id
+      await fetchSessions()
+    }
+  }
+
   function startStreamingRequest({ currentMode, prompt, userMessage, buildContext = null }) {
     const state = getModeState(currentMode)
 
     state.messages.push(userMessage)
     state.draft = ''
+    traversedNodeIds.value = []
     scrollBottom()
 
     state.messages.push({ role: 'assistant', steps: [], files: [], mode: currentMode })
@@ -502,6 +602,14 @@ export function useOntologyStudio() {
 
     es.addEventListener('neo4j_update', () => {
       refreshSchema()
+    })
+
+    es.addEventListener('traversed_nodes', (event) => {
+      const data = JSON.parse(event.data)
+      const ids = data.node_ids || []
+      if (ids.length) {
+        traversedNodeIds.value = [...traversedNodeIds.value, ...ids]
+      }
     })
 
     es.addEventListener('preprocess_progress', (event) => {
@@ -569,6 +677,7 @@ export function useOntologyStudio() {
       activeEventSource = null
       es.close()
       persistMessages(currentMode)
+      autoUpdateSessionTitle(currentMode, prompt)
       refreshAll()
       scrollBottom()
     })
@@ -598,6 +707,9 @@ export function useOntologyStudio() {
     if (isStreaming.value) {
       return
     }
+
+    // Lazily create session on server if pending
+    await ensureSessionOnServer()
 
     // If there are already messages, this is a follow-up (e.g. "계속해")
     const hasExistingMessages = state.messages.length > 0
@@ -689,6 +801,7 @@ export function useOntologyStudio() {
     })
     uploadedFiles.value = []
     outputFiles.value = []
+    traversedNodeIds.value = []
     for (const key of MODE_KEYS) {
       resetModeState(key)
     }
@@ -707,7 +820,9 @@ export function useOntologyStudio() {
 
   async function createNewSession(title = '') {
     try {
-      const res = await fetch(`${API}/api/sessions?title=${encodeURIComponent(title)}`, {
+      const currentMode = mode.value
+      const params = new URLSearchParams({ title: title || '새 대화', mode: currentMode })
+      const res = await fetch(`${API}/api/sessions?${params}`, {
         method: 'POST',
       })
       const session = await res.json()
@@ -716,6 +831,7 @@ export function useOntologyStudio() {
         resetModeState(key)
       }
       uploadedFiles.value = []
+      traversedNodeIds.value = []
       outputFiles.value = []
       await fetchSessions()
       await refreshAll()
@@ -729,10 +845,12 @@ export function useOntologyStudio() {
     if (targetSessionId === sessionId.value || isStreaming.value) {
       return
     }
-    // Save current session messages before switching
-    for (const m of MODE_KEYS) {
-      if (getModeState(m).messages.length > 0) {
-        persistMessages(m)
+    // Save current session messages before switching (skip pending sessions)
+    if (!sessionId.value.startsWith('pending_')) {
+      for (const m of MODE_KEYS) {
+        if (getModeState(m).messages.length > 0) {
+          persistMessages(m)
+        }
       }
     }
     sessionId.value = targetSessionId
@@ -741,6 +859,12 @@ export function useOntologyStudio() {
     }
     uploadedFiles.value = []
     outputFiles.value = []
+    traversedNodeIds.value = []
+    // Switch mode to match the session's mode
+    const session = sessions.value.find(s => s.id === targetSessionId)
+    if (session?.mode && MODES[session.mode]) {
+      mode.value = session.mode
+    }
     await loadSessionMessages(targetSessionId)
     await refreshAll()
   }
@@ -788,10 +912,13 @@ export function useOntologyStudio() {
   })
 
   return {
+    apiBase: API,
     addBuildGoldenQuestion,
     importBuildGoldenQuestions,
     buildGoldenQuestions,
     buildIntent,
+    buildSessions,
+    answerSessions,
     canSend,
     canSubmitBuildFeedback,
     clearNeo4jAll,
@@ -803,7 +930,9 @@ export function useOntologyStudio() {
     effectiveInputPlaceholder,
     entityCounts,
     examples,
+    fetchGraphData,
     fetchSessions,
+    graphData,
     inputText,
     isBuildBriefReady,
     isNeo4jTool,
@@ -830,6 +959,7 @@ export function useOntologyStudio() {
     submitBuildFeedback,
     switchSession,
     todos,
+    traversedNodeIds,
     uploadedFiles,
   }
 }

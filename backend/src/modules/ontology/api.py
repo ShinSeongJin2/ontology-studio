@@ -106,3 +106,105 @@ async def get_graph(class_name: str = "", limit: int = 100):
         return {"nodes": list(nodes.values()), "edges": edges}
     except Exception as exc:  # pragma: no cover - passthrough error handling
         return {"nodes": [], "edges": [], "error": str(exc)}
+
+
+@router.get("/api/graph/neighbors")
+async def get_neighbors(node_id: str, depth: int = 1):
+    """Return neighbors of a specific node up to given depth."""
+
+    try:
+        driver = get_driver()
+        with driver.session() as session:
+            result = session.run(
+                "MATCH (n:_Entity) WHERE elementId(n) = $node_id "
+                "CALL apoc.neighbors.tohop(n, '>', $depth) YIELD node AS m "
+                "WITH n, m "
+                "OPTIONAL MATCH (m)-[r]->(o:_Entity) "
+                "OPTIONAL MATCH (p:_Entity)-[r2]->(m) "
+                "RETURN m, r, o, r2, p",
+                {"node_id": node_id, "depth": depth},
+            )
+
+            nodes = {}
+            edges = []
+
+            # Include the source node itself
+            src = session.run(
+                "MATCH (n:_Entity) WHERE elementId(n) = $node_id RETURN n",
+                {"node_id": node_id},
+            ).single()
+            if src:
+                sn = src["n"]
+                nodes[sn.element_id] = {
+                    "id": sn.element_id,
+                    "label": dict(sn).get("name", ""),
+                    "labels": list(sn.labels),
+                    "properties": dict(sn),
+                }
+
+            for record in result:
+                for key in ["m", "o", "p"]:
+                    nd = record[key]
+                    if nd and nd.element_id not in nodes:
+                        nodes[nd.element_id] = {
+                            "id": nd.element_id,
+                            "label": dict(nd).get("name", ""),
+                            "labels": list(nd.labels),
+                            "properties": dict(nd),
+                        }
+                for key in ["r", "r2"]:
+                    rel = record[key]
+                    if rel:
+                        edge = {
+                            "from": rel.start_node.element_id,
+                            "to": rel.end_node.element_id,
+                            "type": rel.type,
+                            "properties": dict(rel),
+                        }
+                        if not any(
+                            e["from"] == edge["from"]
+                            and e["to"] == edge["to"]
+                            and e["type"] == edge["type"]
+                            for e in edges
+                        ):
+                            edges.append(edge)
+
+        return {"nodes": list(nodes.values()), "edges": edges}
+    except Exception as exc:  # pragma: no cover
+        # Fallback: APOC not installed — use plain Cypher
+        try:
+            driver = get_driver()
+            with driver.session() as session:
+                result = session.run(
+                    "MATCH (n:_Entity) WHERE elementId(n) = $node_id "
+                    "OPTIONAL MATCH (n)-[r]-(m:_Entity) "
+                    "RETURN n, r, m",
+                    {"node_id": node_id},
+                )
+
+                nodes = {}
+                edges = []
+                for record in result:
+                    for key in ["n", "m"]:
+                        nd = record[key]
+                        if nd and nd.element_id not in nodes:
+                            nodes[nd.element_id] = {
+                                "id": nd.element_id,
+                                "label": dict(nd).get("name", ""),
+                                "labels": list(nd.labels),
+                                "properties": dict(nd),
+                            }
+                    rel = record["r"]
+                    if rel:
+                        edges.append(
+                            {
+                                "from": rel.start_node.element_id,
+                                "to": rel.end_node.element_id,
+                                "type": rel.type,
+                                "properties": dict(rel),
+                            }
+                        )
+
+            return {"nodes": list(nodes.values()), "edges": edges}
+        except Exception as inner_exc:  # pragma: no cover
+            return {"nodes": [], "edges": [], "error": str(inner_exc)}

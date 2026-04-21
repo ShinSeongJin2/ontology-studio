@@ -65,11 +65,11 @@ async def get_sessions():
 
 
 @router.post("/api/sessions")
-async def create_session(title: str = ""):
+async def create_session(title: str = "", mode: str = ""):
     """Create a new session and return its metadata."""
 
     session_id = uuid.uuid4().hex[:12]
-    session = ensure_session(session_id, title=title or "새 대화")
+    session = ensure_session(session_id, title=title or "새 대화", mode=mode)
     return session
 
 

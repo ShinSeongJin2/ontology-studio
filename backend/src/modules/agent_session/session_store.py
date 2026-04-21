@@ -37,6 +37,7 @@ def init_db() -> None:
         CREATE TABLE IF NOT EXISTS sessions (
             id          TEXT PRIMARY KEY,
             title       TEXT NOT NULL DEFAULT '',
+            mode        TEXT NOT NULL DEFAULT '',
             created_at  REAL NOT NULL,
             updated_at  REAL NOT NULL
         );
@@ -71,6 +72,11 @@ def init_db() -> None:
             FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
         );
     """)
+    # Migrate: add mode column if missing (existing DBs)
+    try:
+        conn.execute("SELECT mode FROM sessions LIMIT 1")
+    except sqlite3.OperationalError:
+        conn.execute("ALTER TABLE sessions ADD COLUMN mode TEXT NOT NULL DEFAULT ''")
     conn.commit()
 
 
@@ -78,15 +84,22 @@ def init_db() -> None:
 # Session CRUD
 # ---------------------------------------------------------------------------
 
-def list_sessions() -> list[dict[str, Any]]:
-    """Return all sessions ordered by most recent first."""
+def list_sessions(mode_filter: str = "") -> list[dict[str, Any]]:
+    """Return all sessions ordered by most recent first, optionally filtered by mode."""
 
     conn = _get_conn()
-    rows = conn.execute(
-        "SELECT id, title, created_at, updated_at FROM sessions ORDER BY updated_at DESC"
-    ).fetchall()
+    if mode_filter:
+        rows = conn.execute(
+            "SELECT id, title, mode, created_at, updated_at FROM sessions "
+            "WHERE mode = ? ORDER BY updated_at DESC",
+            (mode_filter,),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT id, title, mode, created_at, updated_at FROM sessions ORDER BY updated_at DESC"
+        ).fetchall()
     return [
-        {"id": r[0], "title": r[1], "created_at": r[2], "updated_at": r[3]}
+        {"id": r[0], "title": r[1], "mode": r[2], "created_at": r[3], "updated_at": r[4]}
         for r in rows
     ]
 
@@ -96,15 +109,15 @@ def get_session(session_id: str) -> dict[str, Any] | None:
 
     conn = _get_conn()
     row = conn.execute(
-        "SELECT id, title, created_at, updated_at FROM sessions WHERE id = ?",
+        "SELECT id, title, mode, created_at, updated_at FROM sessions WHERE id = ?",
         (session_id,),
     ).fetchone()
     if row is None:
         return None
-    return {"id": row[0], "title": row[1], "created_at": row[2], "updated_at": row[3]}
+    return {"id": row[0], "title": row[1], "mode": row[2], "created_at": row[3], "updated_at": row[4]}
 
 
-def ensure_session(session_id: str, title: str = "") -> dict[str, Any]:
+def ensure_session(session_id: str, title: str = "", mode: str = "") -> dict[str, Any]:
     """Create session if it doesn't exist; return session metadata."""
 
     existing = get_session(session_id)
@@ -113,11 +126,11 @@ def ensure_session(session_id: str, title: str = "") -> dict[str, Any]:
     now = time.time()
     conn = _get_conn()
     conn.execute(
-        "INSERT INTO sessions (id, title, created_at, updated_at) VALUES (?, ?, ?, ?)",
-        (session_id, title, now, now),
+        "INSERT INTO sessions (id, title, mode, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+        (session_id, title, mode, now, now),
     )
     conn.commit()
-    return {"id": session_id, "title": title, "created_at": now, "updated_at": now}
+    return {"id": session_id, "title": title, "mode": mode, "created_at": now, "updated_at": now}
 
 
 def update_session_title(session_id: str, title: str) -> None:

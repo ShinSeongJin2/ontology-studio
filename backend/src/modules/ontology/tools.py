@@ -567,16 +567,83 @@ def batch_ingest(nodes_json: str) -> str:
             except Exception as exc:
                 errors.append(f"관계 {from_id}-[{rel_type}]->{to_id}: {exc}")
 
+        # Embed nodes and create vector index
+        embed_count = 0
+        try:
+            embed_count = _embed_entity_nodes()
+        except Exception as embed_exc:
+            errors.append(f"임베딩: {embed_exc}")
+
         result = {
             "status": "ok",
             "nodes_created": node_count,
             "relationships_created": rel_count,
+            "nodes_embedded": embed_count,
         }
         if errors:
             result["errors"] = errors[:20]  # limit error output
         return json.dumps(result, ensure_ascii=False)
     except Exception as exc:
         return json.dumps({"error": str(exc)}, ensure_ascii=False)
+
+
+def _embed_entity_nodes(batch_size: int = 20) -> int:
+    """Embed all _Entity nodes that don't have an embedding yet."""
+
+    from .embedding import embed_texts, node_text_for_embedding
+
+    # Get nodes without embeddings
+    rows = _run_query("""
+        MATCH (n:_Entity) WHERE n.embedding IS NULL
+        RETURN elementId(n) AS eid,
+               n.name AS name, n.title AS title,
+               substring(toString(n.content), 0, 1500) AS content
+        LIMIT 500
+    """)
+    if not rows:
+        return 0
+
+    # Build texts and embed in batches
+    total_embedded = 0
+    for i in range(0, len(rows), batch_size):
+        batch = rows[i:i + batch_size]
+        texts = []
+        for row in batch:
+            parts = []
+            if row.get("name"):
+                parts.append(str(row["name"]))
+            if row.get("title"):
+                parts.append(str(row["title"]))
+            if row.get("content"):
+                parts.append(str(row["content"]))
+            texts.append(" ".join(parts) if parts else " ")
+
+        vectors = embed_texts(texts)
+
+        for row, vec in zip(batch, vectors):
+            if not vec or all(v == 0.0 for v in vec[:10]):
+                continue
+            _run_query(
+                "MATCH (n:_Entity) WHERE elementId(n) = $eid SET n.embedding = $vec",
+                {"eid": row["eid"], "vec": vec},
+            )
+            total_embedded += 1
+
+    # Create vector index if not exists
+    if total_embedded > 0:
+        try:
+            _run_query(f"""
+                CREATE VECTOR INDEX entity_embedding_vector IF NOT EXISTS
+                FOR (n:_Entity) ON (n.embedding)
+                OPTIONS {{indexConfig: {{
+                    `vector.dimensions`: {len(vectors[0])},
+                    `vector.similarity_function`: 'cosine'
+                }}}}
+            """)
+        except Exception:
+            pass  # index may already exist with different config
+
+    return total_embedded
 
 
 def graph_stats() -> str:
@@ -606,3 +673,35 @@ def graph_stats() -> str:
         }, ensure_ascii=False)
     except Exception as exc:
         return json.dumps({"error": str(exc)}, ensure_ascii=False)
+
+
+def vector_search(query: str, top_k: int = 3) -> str:
+    """Search entity nodes by semantic similarity using HyDE vector embeddings."""
+
+    from .embedding import hyde_embed
+
+    try:
+        query_vec = hyde_embed(query)
+        if all(v == 0.0 for v in query_vec[:10]):
+            return json.dumps({"error": "임베딩 생성 실패"}, ensure_ascii=False)
+
+        rows = _run_readonly_query(
+            """
+            CALL db.index.vector.queryNodes('entity_embedding_vector', $top_k, $embedding)
+            YIELD node, score
+            RETURN elementId(node) AS node_id,
+                   [l IN labels(node) WHERE l <> '_Entity'] AS classes,
+                   node.title AS title,
+                   node.name AS name,
+                   node.number AS number,
+                   substring(toString(node.content), 0, 500) AS content_preview,
+                   score
+            """,
+            {"top_k": top_k, "embedding": query_vec},
+        )
+        return _serialize_rows(rows, max_chars=2000)
+    except Exception as exc:
+        error_msg = str(exc)
+        if "no such index" in error_msg.lower() or "index not found" in error_msg.lower():
+            return json.dumps({"error": "벡터 인덱스가 아직 생성되지 않았습니다. 먼저 온톨로지를 구축하세요."}, ensure_ascii=False)
+        return json.dumps({"error": error_msg}, ensure_ascii=False)
