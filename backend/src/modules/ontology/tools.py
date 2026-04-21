@@ -457,12 +457,25 @@ def batch_ingest(nodes_json: str) -> str:
     try:
         data_str = nodes_json.strip()
 
-        # If it looks like a file path, read the file
+        # If it looks like a file path, read from sandbox or local
         if not data_str.startswith("{") and not data_str.startswith("["):
             file_path = Path(data_str)
-            if not file_path.exists():
+            if file_path.exists():
+                data_str = file_path.read_text(encoding="utf-8")
+            elif data_str.startswith("/workspace/"):
+                # File is inside the sandbox container — read via docker exec
+                import subprocess
+                from ...shared.kernel.settings import get_settings
+                settings = get_settings()
+                result = subprocess.run(
+                    ["docker", "exec", settings.container_name, "cat", data_str],
+                    capture_output=True, timeout=30,
+                )
+                if result.returncode != 0:
+                    return json.dumps({"error": f"파일을 읽을 수 없습니다: {data_str}"}, ensure_ascii=False)
+                data_str = result.stdout.decode("utf-8")
+            else:
                 return json.dumps({"error": f"파일을 찾을 수 없습니다: {data_str}"}, ensure_ascii=False)
-            data_str = file_path.read_text(encoding="utf-8")
 
         data = json.loads(data_str)
         nodes = data.get("nodes", [])

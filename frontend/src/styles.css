@@ -1219,6 +1219,58 @@ body {
   }
 }
 
+.tool-description {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  margin: 2px 0 4px 8px;
+  padding-left: 4px;
+  border-left: 2px solid var(--border);
+}
+
+.tool-args-summary {
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  margin-left: 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 300px;
+}
+
+.tool-args-detail {
+  margin-left: 8px;
+}
+
+.tool-args-detail summary {
+  cursor: pointer;
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  padding: 2px 4px;
+}
+
+.tool-args-detail summary:hover {
+  color: var(--accent);
+}
+
+.tool-args-detail pre {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px;
+  margin-top: 4px;
+  font-size: 0.75rem;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  color: var(--purple);
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 300px;
+  overflow-y: auto;
+}
+
+.tool-args-detail pre.tool-code {
+  color: #79c0ff;
+}
+
 .tool-result-detail {
   margin-left: 8px;
 }

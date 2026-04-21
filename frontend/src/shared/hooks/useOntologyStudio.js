@@ -288,7 +288,8 @@ export function useOntologyStudio() {
 
   function persistMessages(targetMode = mode.value) {
     const state = getModeState(targetMode)
-    const serializable = state.messages.map((msg) => ({ ...msg }))
+    // Deep clone to ensure nested objects (steps, args, buildReport) are serialized
+    const serializable = JSON.parse(JSON.stringify(state.messages))
     fetch(
       `${API}/api/sessions/${encodeURIComponent(sessionId.value)}/messages?mode=${targetMode}`,
       {
@@ -475,7 +476,13 @@ export function useOntologyStudio() {
     es.addEventListener('tool_start', (event) => {
       const data = JSON.parse(event.data)
       currentTokenIdx = -1
-      getAiMsg().steps.push({ type: 'tool_start', name: data.name, done: false })
+      getAiMsg().steps.push({
+        type: 'tool_start',
+        name: data.name,
+        args: data.args || {},
+        description: data.description || '',
+        done: false,
+      })
       scrollBottom()
     })
 
@@ -767,9 +774,10 @@ export function useOntologyStudio() {
     return data
   }
 
-  onMounted(() => {
-    fetchSessions()
-    refreshAll()
+  onMounted(async () => {
+    await fetchSessions()
+    await loadSessionMessages(sessionId.value)
+    await refreshAll()
     neo4jInterval = setInterval(checkNeo4jStatus, 30000)
   })
 

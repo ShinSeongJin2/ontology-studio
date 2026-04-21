@@ -33,7 +33,7 @@ from ...shared.kernel.model_profiles import (
     should_use_openai_responses_api,
 )
 from ...shared.kernel.settings import get_settings
-from ...shared.sandbox.docker_backend import DockerSandboxBackend
+from .sandbox_tools import execute, sandbox_ls, sandbox_read, sandbox_write
 from .session_store import (
     delete_session_messages as _db_delete_messages,
     ensure_session as _db_ensure_session,
@@ -230,6 +230,10 @@ _BUILD_MODE_TOOLS = [
     relationship_create,
     batch_ingest,
     graph_stats,
+    execute,
+    sandbox_ls,
+    sandbox_read,
+    sandbox_write,
 ]
 
 _ANSWER_MODE_TOOLS = [
@@ -421,6 +425,144 @@ def _compose_build_prompt(prompt: str, build_context: dict[str, Any]) -> str:
     return "\n\n".join(section for section in sections if section.strip())
 
 
+def _summarize_previous_session(session_id: str, mode: AgentMode) -> str:
+    """Build a compact summary of what the previous agent session accomplished."""
+
+    cp = _get_shared_checkpointer()
+    thread_id = _session_key(session_id, mode)
+    try:
+        checkpoint = cp.get({"configurable": {"thread_id": thread_id}})
+    except Exception:
+        return ""
+    if not checkpoint:
+        return ""
+
+    msgs = checkpoint.get("channel_values", {}).get("messages", [])
+    if not msgs:
+        return ""
+
+    # Collect tool calls made and their results (compact)
+    schema_actions = []
+    data_actions = []
+    errors = []
+
+    for msg in msgs:
+        if isinstance(msg, AIMessage) and msg.tool_calls:
+            for tc in msg.tool_calls:
+                name = tc.get("name", "")
+                if name.startswith("schema_create"):
+                    args = tc.get("args", {})
+                    schema_actions.append(f"{name}({args.get('name', '')})")
+                elif name in ("execute", "batch_ingest"):
+                    data_actions.append(name)
+                elif name == "graph_stats":
+                    data_actions.append("graph_stats")
+        elif isinstance(msg, ToolMessage):
+            content = msg.content if isinstance(msg.content, str) else str(msg.content)
+            if '"error"' in content or "exit_code" in content:
+                errors.append(f"{msg.name}: {content[:100]}")
+
+    # Extract last AI text (final report/summary)
+    last_ai_text = ""
+    for msg in reversed(msgs):
+        if isinstance(msg, AIMessage) and isinstance(msg.content, str) and len(msg.content) > 50:
+            last_ai_text = msg.content[:500]
+            break
+
+    lines = []
+    if schema_actions:
+        lines.append(f"스키마 작업: {', '.join(schema_actions[:10])}")
+    if data_actions:
+        from collections import Counter
+        counts = Counter(data_actions)
+        lines.append(f"데이터 작업: {', '.join(f'{k}({v}회)' for k, v in counts.items())}")
+    if errors:
+        lines.append(f"에러 {len(errors)}건 (예: {errors[0][:80]})")
+    lines.append(f"총 메시지 수: {len(msgs)}")
+    if last_ai_text:
+        lines.append(f"마지막 에이전트 응답 요약: {last_ai_text[:300]}")
+
+    return "\n".join(lines)
+
+
+def _list_sandbox_output_files() -> list[str]:
+    """List files in /workspace/output/ inside the sandbox container."""
+
+    import subprocess
+    settings = get_settings()
+    try:
+        result = subprocess.run(
+            ["docker", "exec", settings.container_name, "ls", "-1", "/workspace/output/"],
+            capture_output=True, timeout=5,
+        )
+        if result.returncode == 0:
+            return [f.strip() for f in result.stdout.decode().strip().split("\n") if f.strip()]
+    except Exception:
+        pass
+    return []
+
+
+def _compose_continuation_prompt(
+    prompt: str,
+    build_context: dict[str, Any],
+    session_id: str,
+    mode: AgentMode,
+) -> str:
+    """Compose a follow-up prompt with mission context, previous session summary, and existing artifacts."""
+
+    sections = [f"[사용자 후속 요청]\n{prompt.strip()}"]
+
+    # 1. Original mission (intent + golden questions)
+    if build_context.get("intent"):
+        sections.append(f"[최초 구축 의도]\n{build_context['intent']}")
+    if build_context.get("golden_questions"):
+        gq_lines = "\n".join(
+            f"{i}. {q}" for i, q in enumerate(build_context["golden_questions"], 1)
+        )
+        sections.append(f"[Golden Question]\n{gq_lines}")
+
+    # 2. Review feedback if any
+    if build_context.get("review_feedback"):
+        feedback_lines = []
+        for i, item in enumerate(build_context["review_feedback"], 1):
+            feedback_lines.append(
+                f"{i}. {item['question']} → 판정: {item.get('verdict', '미지정')}, "
+                f"피드백: {item.get('feedback', '없음')}"
+            )
+        sections.append("[검토 피드백]\n" + "\n".join(feedback_lines))
+
+    # 3. Previous session summary
+    summary = _summarize_previous_session(session_id, mode)
+    if summary:
+        sections.append(f"[이전 에이전트 세션 요약]\n{summary}")
+
+    # 4. Existing artifacts in sandbox
+    output_files = _list_sandbox_output_files()
+    if output_files:
+        sections.append(
+            "[기존 산출물 파일 (/workspace/output/)]\n"
+            + "\n".join(f"- {f}" for f in output_files)
+            + "\n위 파일들을 sandbox_read나 execute로 확인하여 기존 작업을 이어가세요."
+        )
+
+    # 5. Current graph stats (compact)
+    try:
+        from ..ontology.tools import graph_stats
+        stats = graph_stats()
+        sections.append(f"[현재 그래프 상태]\n{stats}")
+    except Exception:
+        pass
+
+    sections.append(
+        "[완료 기준]\n"
+        "- 현재 온톨로지 스키마와 그래프만으로 Golden Question에 답할 수 있어야 합니다.\n"
+        "- 최종 응답 마지막에는 ontology_build_report JSON 코드 블록을 반드시 포함하세요.\n"
+        "- report의 question은 사용자가 입력한 Golden Question과 동일한 문장을 유지하세요."
+    )
+
+    return "\n\n".join(s for s in sections if s.strip())
+
+
 def _normalize_build_report_question(
     item: dict[str, Any],
     fallback_question: str,
@@ -594,17 +736,11 @@ def _get_shared_checkpointer():
 def _create_build_agent():
     """Create the ontology construction agent with sandbox access."""
 
-    from deepagents import create_deep_agent
+    from langchain.agents import create_agent
     from .tool_call_parser import ToolCallParserMiddleware
 
-    settings = get_settings()
-    backend = DockerSandboxBackend(
-        container_name=settings.container_name,
-        workdir=settings.sandbox_workdir,
-    )
-    return create_deep_agent(
+    return create_agent(
         model=_init_model("build"),
-        backend=backend,
         tools=_BUILD_MODE_TOOLS,
         system_prompt=ONTOLOGY_BUILD_SYSTEM_PROMPT,
         checkpointer=_get_shared_checkpointer(),
@@ -615,9 +751,9 @@ def _create_build_agent():
 def _create_answer_agent():
     """Create the question-answering agent with read-only ontology tools."""
 
-    from deepagents import create_deep_agent
+    from langchain.agents import create_agent
 
-    return create_deep_agent(
+    return create_agent(
         model=_init_model("answer"),
         tools=_ANSWER_MODE_TOOLS,
         system_prompt=ONTOLOGY_ANSWER_SYSTEM_PROMPT,
@@ -722,6 +858,57 @@ def _resolve_preprocess_stage(detail: dict[str, Any] | None) -> str:
     if stage in {"ocr", "embedding", "neo4j_upsert"}:
         return stage
     return "ocr"
+
+
+def _describe_tool_call(tool_name: str, args: dict[str, Any] | None) -> str:
+    """Generate a human-readable Korean description for a tool call."""
+
+    args = args or {}
+    if tool_name == "execute":
+        cmd = args.get("command", "")
+        if "pdfplumber" in cmd:
+            return "PDF 문서를 파싱하여 텍스트를 추출합니다"
+        if "openpyxl" in cmd:
+            return "Excel 파일을 읽어 데이터를 추출합니다"
+        if "json.dump" in cmd or "json.dumps" in cmd:
+            return "파싱 결과를 JSON 파일로 저장합니다"
+        if cmd.startswith("ls ") or cmd.startswith("find "):
+            return "파일 시스템을 탐색합니다"
+        if "cat " in cmd:
+            return "파일 내용을 읽습니다"
+        first_line = cmd.split("\n")[0][:60]
+        return f"코드를 실행합니다: {first_line}"
+    if tool_name == "sandbox_ls":
+        return f"{args.get('path', '/workspace')} 디렉토리의 파일 목록을 조회합니다"
+    if tool_name == "sandbox_read":
+        path = args.get("file_path", "")
+        return f"파일을 읽습니다: {Path(path).name}" if path else "파일을 읽습니다"
+    if tool_name == "sandbox_write":
+        path = args.get("file_path", "")
+        return f"파일을 작성합니다: {Path(path).name}" if path else "파일을 작성합니다"
+    if tool_name == "schema_get":
+        return "현재 온톨로지 스키마를 조회합니다"
+    if tool_name == "schema_create_class":
+        return f"클래스 '{args.get('name', '')}' 를 생성합니다"
+    if tool_name == "schema_create_relationship_type":
+        return f"관계 유형 '{args.get('name', '')}' ({args.get('from_class', '')} → {args.get('to_class', '')})를 정의합니다"
+    if tool_name == "entity_create":
+        return f"'{args.get('class_name', '')}' 엔티티를 생성합니다"
+    if tool_name == "entity_search":
+        return f"'{args.get('class_name', '')}' 엔티티를 검색합니다"
+    if tool_name == "relationship_create":
+        return f"관계 '{args.get('relationship_type', '')}' 를 생성합니다"
+    if tool_name == "batch_ingest":
+        src = args.get("nodes_json", "")
+        if src.startswith("/"):
+            return f"파싱 결과를 Neo4j에 일괄 적재합니다: {Path(src).name}"
+        return "파싱 결과를 Neo4j에 일괄 적재합니다"
+    if tool_name == "graph_stats":
+        return "그래프 전체 통계를 조회합니다 (노드 수, 관계 수)"
+    if tool_name == "neo4j_cypher" or tool_name == "neo4j_cypher_readonly":
+        query = args.get("query", "")[:60]
+        return f"Cypher 쿼리를 실행합니다: {query}"
+    return f"{tool_name} 도구를 실행합니다"
 
 
 def _emit_tool_side_effects(
@@ -852,13 +1039,79 @@ def _run_agent_in_thread(
         )
         # SqliteSaver checkpointer automatically persists and restores history
         # via thread_id — only send the new user message.
+        from .tool_call_parser import _extract_tool_calls_from_text
+
+        # For continuation, start a new thread to avoid bloating context
+        # with the full previous conversation. The continuation prompt
+        # already contains the mission, summary, and artifacts.
+        if _has_existing_checkpoint(session_id, mode):
+            thread_id = f"{thread_id}:{uuid.uuid4().hex[:8]}"
+
         config = {"configurable": {"thread_id": thread_id}}
-        for event_mode, payload in agent.stream(
-            {"messages": [HumanMessage(content=prompt)]},
-            config=config,
-            stream_mode=stream_modes,
-        ):
-            loop.call_soon_threadsafe(queue.put_nowait, (event_mode, payload))
+        input_msg = {"messages": [HumanMessage(content=prompt)]}
+        max_raw_retries = 10  # prevent infinite loops
+
+        for _retry in range(max_raw_retries):
+            for event_mode, payload in agent.stream(
+                input_msg,
+                config=config,
+                stream_mode=stream_modes,
+            ):
+                loop.call_soon_threadsafe(queue.put_nowait, (event_mode, payload))
+
+            # Check if the last AIMessage contains raw tool calls
+            state = agent.get_state(config)
+            msgs = state.values.get("messages", [])
+            last_ai = None
+            for m in reversed(msgs):
+                if isinstance(m, AIMessage):
+                    last_ai = m
+                    break
+            if last_ai is None or last_ai.tool_calls:
+                break  # normal finish or already has tool_calls
+
+            content = last_ai.content if isinstance(last_ai.content, str) else str(last_ai.content)
+            if "<|start|>" not in content:
+                break  # no raw tool calls
+
+            cleaned, tool_calls = _extract_tool_calls_from_text(content)
+            if not tool_calls:
+                break
+
+            # Execute the parsed tool calls and inject results
+            tool_results = []
+            for tc in tool_calls:
+                tool_name = tc["name"]
+                tool_args = tc["args"]
+                tool_id = tc["id"]
+                # Find and execute the tool
+                tool_fn = None
+                for t in _BUILD_MODE_TOOLS:
+                    fn_name = getattr(t, "__name__", getattr(t, "name", ""))
+                    if fn_name == tool_name:
+                        tool_fn = t
+                        break
+                if tool_fn is None:
+                    result_content = json.dumps({"error": f"Tool '{tool_name}' not found"})
+                else:
+                    try:
+                        result_content = tool_fn(**tool_args)
+                    except Exception as tool_exc:
+                        result_content = json.dumps({"error": str(tool_exc)})
+
+                # Emit tool_start and tool_result SSE events
+                loop.call_soon_threadsafe(queue.put_nowait, (
+                    "updates",
+                    {"tools": {"messages": [ToolMessage(content=result_content, tool_call_id=tool_id, name=tool_name)]}},
+                ))
+                tool_results.append(ToolMessage(content=result_content, tool_call_id=tool_id, name=tool_name))
+
+            # Update the checkpoint: replace the raw AIMessage + add ToolMessages
+            new_ai = AIMessage(content=cleaned, tool_calls=tool_calls)
+            agent.update_state(config, {"messages": [new_ai] + tool_results})
+
+            # Continue the loop — agent will process tool results
+            input_msg = None  # resume from checkpoint
     except Exception as exc:  # pragma: no cover - passthrough error handling
         log_agent_event(
             "ERROR",
@@ -907,14 +1160,16 @@ async def generate_sse(
             has_build_context = True
 
     is_continuation = has_checkpoint
-    # For continuation with checkpoint, send prompt as-is.
-    # For follow-up without checkpoint (interrupted during preprocessing),
-    # re-compose the full build prompt so the agent has context.
-    effective_prompt = (
-        _compose_build_prompt(prompt, build_context)
-        if mode == "build" and not is_continuation
-        else prompt
-    )
+    if mode == "build" and not is_continuation:
+        # First request — full build prompt with intent, golden questions
+        effective_prompt = _compose_build_prompt(prompt, build_context)
+    elif mode == "build" and is_continuation:
+        # Follow-up — include mission, previous summary, and existing artifacts
+        effective_prompt = _compose_continuation_prompt(
+            prompt, build_context, session_id, mode
+        )
+    else:
+        effective_prompt = prompt
     settings = get_settings()
     model_profile = _resolve_agent_model_profile(mode)
     stream_modes = ["messages", "updates"] if not model_profile.uses_custom_base_url else ["updates"]
@@ -1123,12 +1378,15 @@ async def generate_sse(
                             node,
                             tool_call,
                         ):
+                            tc_args = tool_call.get("args", {})
                             yield _format_sse(
                                 "tool_start",
                                 {
                                     "tool_call_id": tool_call_id,
                                     "name": tool_call["name"],
                                     "node": node,
+                                    "args": tc_args,
+                                    "description": _describe_tool_call(tool_call["name"], tc_args),
                                 },
                             )
 
@@ -1191,12 +1449,15 @@ async def generate_sse(
                                         node_name,
                                         tool_call,
                                     ):
+                                        tc_args = tool_call.get("args", {})
                                         yield _format_sse(
                                             "tool_start",
                                             {
                                                 "tool_call_id": tool_call_id,
                                                 "name": tool_name,
                                                 "node": node_name,
+                                                "args": tc_args,
+                                                "description": _describe_tool_call(tool_name, tc_args),
                                             },
                                         )
                         elif isinstance(message, ToolMessage):
