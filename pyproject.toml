@@ -21,6 +21,7 @@ dependencies = [
     "python-multipart",
     "tiktoken",
     "uvicorn",
+    "langgraph-checkpoint-sqlite>=3.0.3",
 ]
 
 [project.scripts]

@@ -46,3 +46,4 @@ p_*
 AGENTS.md
 .cursor
 .cache
+backend/data/

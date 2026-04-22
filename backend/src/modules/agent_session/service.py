@@ -71,7 +71,7 @@ _MAX_HISTORY_TOKENS = 12000  # leave headroom for system prompt + new response
 _TOOL_RESULT_TRUNCATE_CHARS = 2000  # max chars kept per tool result in history
 _TOOL_RESULT_SUMMARY_SUFFIX = "\n... [결과가 잘렸습니다. 필요시 다시 조회하세요.]"
 
-ONTOLOGY_BUILD_SYSTEM_PROMPT = """\
+ONTOLOGY_BUILD_SYSTEM_PROMPT = r"""\
 한국어로 응답하세요. 당신은 Ontology Studio 에이전트입니다.
 
 ## 역할
