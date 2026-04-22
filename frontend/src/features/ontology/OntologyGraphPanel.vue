@@ -48,7 +48,7 @@
       <div class="node-detail-props">
         <div v-for="(val, key) in displayProps" :key="key" class="node-prop-row">
           <span class="node-prop-key">{{ key }}</span>
-          <span class="node-prop-val">{{ truncate(String(val), 120) }}</span>
+          <span class="node-prop-val">{{ truncate(formatPropValue(val), 120) }}</span>
         </div>
       </div>
       <div class="node-detail-actions">
@@ -138,6 +138,51 @@ const displayProps = computed(() => {
 
 function truncate(str, max) {
   return str.length > max ? str.slice(0, max) + '…' : str
+}
+
+function padNumber(value) {
+  return String(value).padStart(2, '0')
+}
+
+function formatNeo4jTemporalObject(value) {
+  if (!value || typeof value !== 'object') return null
+
+  const datePart = value._DateTime__date || value
+  const timePart = value._DateTime__time
+  const year = datePart._Date__year
+  const month = datePart._Date__month
+  const day = datePart._Date__day
+
+  if (!year || !month || !day) return null
+
+  if (!timePart) {
+    return `${year}-${padNumber(month)}-${padNumber(day)}`
+  }
+
+  const hour = timePart._Time__hour ?? 0
+  const minute = timePart._Time__minute ?? 0
+  const second = timePart._Time__second ?? 0
+  return `${year}-${padNumber(month)}-${padNumber(day)} ${padNumber(hour)}:${padNumber(minute)}:${padNumber(second)}`
+}
+
+function formatPropValue(value) {
+  if (value === null || value === undefined) return ''
+  if (typeof value === 'string') return value
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value)
+  if (Array.isArray(value)) {
+    return value.every(item => item === null || ['string', 'number', 'boolean'].includes(typeof item))
+      ? value.join(', ')
+      : JSON.stringify(value)
+  }
+
+  const temporalValue = formatNeo4jTemporalObject(value)
+  if (temporalValue) return temporalValue
+
+  try {
+    return JSON.stringify(value)
+  } catch {
+    return String(value)
+  }
 }
 
 function buildSchemaElements() {

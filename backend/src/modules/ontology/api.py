@@ -11,6 +11,27 @@ from .tools import get_driver, schema_get, _run_query
 router = APIRouter(tags=["ontology"])
 
 
+def _normalize_graph_value(value):
+    """Convert Neo4j values into JSON-friendly scalars/collections."""
+
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, (list, tuple, set)):
+        return [_normalize_graph_value(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _normalize_graph_value(item) for key, item in value.items()}
+    return str(value)
+
+
+def _normalize_graph_properties(entity) -> dict:
+    """Normalize graph entity properties for API responses."""
+
+    return {
+        key: _normalize_graph_value(value)
+        for key, value in dict(entity).items()
+    }
+
+
 @router.get("/api/neo4j/status")
 async def neo4j_status():
     """Report Neo4j connectivity status."""
@@ -242,7 +263,7 @@ async def get_graph(class_name: str = "", schema_name: str = "", limit: int = 10
                         "id": node.element_id,
                         "label": dict(node).get("name", ""),
                         "labels": list(node.labels),
-                        "properties": dict(node),
+                        "properties": _normalize_graph_properties(node),
                     }
 
                 matched_node = record["m"]
@@ -251,7 +272,7 @@ async def get_graph(class_name: str = "", schema_name: str = "", limit: int = 10
                         "id": matched_node.element_id,
                         "label": dict(matched_node).get("name", ""),
                         "labels": list(matched_node.labels),
-                        "properties": dict(matched_node),
+                        "properties": _normalize_graph_properties(matched_node),
                     }
 
                 relationship = record["r"]
@@ -261,7 +282,7 @@ async def get_graph(class_name: str = "", schema_name: str = "", limit: int = 10
                             "from": relationship.start_node.element_id,
                             "to": relationship.end_node.element_id,
                             "type": relationship.type,
-                            "properties": dict(relationship),
+                            "properties": _normalize_graph_properties(relationship),
                         }
                     )
 
@@ -301,7 +322,7 @@ async def get_neighbors(node_id: str, depth: int = 1):
                     "id": sn.element_id,
                     "label": dict(sn).get("name", ""),
                     "labels": list(sn.labels),
-                    "properties": dict(sn),
+                    "properties": _normalize_graph_properties(sn),
                 }
 
             for record in result:
@@ -312,7 +333,7 @@ async def get_neighbors(node_id: str, depth: int = 1):
                             "id": nd.element_id,
                             "label": dict(nd).get("name", ""),
                             "labels": list(nd.labels),
-                            "properties": dict(nd),
+                            "properties": _normalize_graph_properties(nd),
                         }
                 for key in ["r", "r2"]:
                     rel = record[key]
@@ -321,7 +342,7 @@ async def get_neighbors(node_id: str, depth: int = 1):
                             "from": rel.start_node.element_id,
                             "to": rel.end_node.element_id,
                             "type": rel.type,
-                            "properties": dict(rel),
+                            "properties": _normalize_graph_properties(rel),
                         }
                         if not any(
                             e["from"] == edge["from"]
@@ -354,7 +375,7 @@ async def get_neighbors(node_id: str, depth: int = 1):
                                 "id": nd.element_id,
                                 "label": dict(nd).get("name", ""),
                                 "labels": list(nd.labels),
-                                "properties": dict(nd),
+                                "properties": _normalize_graph_properties(nd),
                             }
                     rel = record["r"]
                     if rel:
@@ -363,7 +384,7 @@ async def get_neighbors(node_id: str, depth: int = 1):
                                 "from": rel.start_node.element_id,
                                 "to": rel.end_node.element_id,
                                 "type": rel.type,
-                                "properties": dict(rel),
+                                "properties": _normalize_graph_properties(rel),
                             }
                         )
 
