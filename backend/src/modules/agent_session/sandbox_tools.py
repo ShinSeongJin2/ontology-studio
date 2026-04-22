@@ -21,6 +21,12 @@ def _get_backend() -> DockerSandboxBackend:
     return _backend
 
 
+def ensure_sandbox_ready() -> None:
+    """Fail fast when the sandbox container is unavailable during startup."""
+
+    _get_backend().assert_ready()
+
+
 def execute(command: str) -> str:
     """Execute a shell command (Python or bash) in the sandbox container. Use this for file exploration, running parser scripts, and any code execution."""
 

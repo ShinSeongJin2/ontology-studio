@@ -30,13 +30,19 @@ from ..ontology.tools import (
     schema_group_list,
     vector_search,
 )
-from ...shared.logging import log_agent_event
+from ...shared.logging import SmartLogger, log_agent_event
 from ...shared.kernel.model_profiles import (
     resolve_model_profile,
     should_use_openai_responses_api,
 )
 from ...shared.kernel.settings import get_settings
-from .sandbox_tools import execute, sandbox_ls, sandbox_read, sandbox_write
+from .sandbox_tools import (
+    ensure_sandbox_ready,
+    execute,
+    sandbox_ls,
+    sandbox_read,
+    sandbox_write,
+)
 from .session_store import (
     delete_session_messages as _db_delete_messages,
     ensure_session as _db_ensure_session,
@@ -897,8 +903,35 @@ def _session_key(session_id: str, mode: AgentMode) -> str:
 def warm_up_agent() -> None:
     """Initialize agent dependencies eagerly on app startup."""
 
+    settings = get_settings()
     _db_init()
     _get_shared_checkpointer().setup()
+    try:
+        ensure_sandbox_ready()
+    except Exception as exc:
+        SmartLogger.log(
+            "ERROR",
+            "DeepAgent sandbox sanity check failed during backend startup",
+            category="backend_status",
+            params={
+                "phase": "startup",
+                "container_name": settings.container_name,
+                "sandbox_workdir": settings.sandbox_workdir,
+                "error": str(exc),
+            },
+        )
+        raise
+
+    SmartLogger.log(
+        "INFO",
+        "DeepAgent sandbox passed startup sanity check",
+        category="backend_status",
+        params={
+            "phase": "startup",
+            "container_name": settings.container_name,
+            "sandbox_workdir": settings.sandbox_workdir,
+        },
+    )
     get_agent("build")
     get_agent("answer")
     ensure_workspace_dirs()

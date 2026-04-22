@@ -31,6 +31,82 @@ class DockerSandboxBackend(BaseSandbox):
     def id(self) -> str:
         return self._id
 
+    def assert_ready(self, *, timeout: int = 10) -> None:
+        """Raise when the sandbox container is not running or not exec-accessible."""
+
+        try:
+            inspect_result = subprocess.run(
+                [
+                    "docker",
+                    "inspect",
+                    "-f",
+                    "{{.State.Running}}",
+                    self._container_name,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+        except FileNotFoundError as exc:
+            raise RuntimeError(
+                "Docker CLI를 찾을 수 없어 sandbox 컨테이너 상태를 확인할 수 없습니다."
+            ) from exc
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(
+                f"Sandbox container '{self._container_name}' 상태 확인이 {timeout}초 내에 완료되지 않았습니다."
+            ) from exc
+        except Exception as exc:
+            raise RuntimeError(
+                f"Sandbox container '{self._container_name}' 상태 확인 중 예외가 발생했습니다: {exc}"
+            ) from exc
+
+        inspect_error = (inspect_result.stderr or inspect_result.stdout or "").strip()
+        if inspect_result.returncode != 0:
+            raise RuntimeError(
+                f"Sandbox container '{self._container_name}' 정보를 조회할 수 없습니다: {inspect_error or 'unknown error'}"
+            )
+
+        if inspect_result.stdout.strip().lower() != "true":
+            raise RuntimeError(
+                f"Sandbox container '{self._container_name}'가 실행 중이 아닙니다."
+            )
+
+        try:
+            exec_result = subprocess.run(
+                [
+                    "docker",
+                    "exec",
+                    "-w",
+                    self._workdir,
+                    self._container_name,
+                    "bash",
+                    "-lc",
+                    "printf '__sandbox_ready__'",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(
+                f"Sandbox container '{self._container_name}' 접근 확인이 {timeout}초 내에 완료되지 않았습니다."
+            ) from exc
+        except Exception as exc:
+            raise RuntimeError(
+                f"Sandbox container '{self._container_name}' 접근 확인 중 예외가 발생했습니다: {exc}"
+            ) from exc
+
+        exec_error = (exec_result.stderr or exec_result.stdout or "").strip()
+        if exec_result.returncode != 0:
+            raise RuntimeError(
+                f"Sandbox container '{self._container_name}'에는 접근할 수 있지만 workdir '{self._workdir}'에서 실행할 수 없습니다: {exec_error or 'unknown error'}"
+            )
+
+        if exec_result.stdout != "__sandbox_ready__":
+            raise RuntimeError(
+                f"Sandbox container '{self._container_name}' 응답이 예상과 다릅니다."
+            )
+
     def execute(
         self,
         command: str,
