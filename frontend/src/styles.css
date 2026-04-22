@@ -876,7 +876,20 @@ body {
 .file-panel-list {
   display: flex;
   flex-direction: column;
+  gap: 6px;
+}
+.file-panel-group {
+  display: flex;
+  flex-direction: column;
   gap: 2px;
+}
+.file-panel-group-label {
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  padding: 2px 4px;
 }
 .file-panel-item {
   display: flex;

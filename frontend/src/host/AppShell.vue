@@ -31,7 +31,7 @@
               <span v-if="s.schema_name" class="session-schema-badge">{{ s.schema_name }}</span>
               <span class="session-title">{{ s.title || '새 대화' }}</span>
               <span class="session-date">{{ formatSessionDate(s.updated_at) }}</span>
-              <button class="session-delete" title="삭제" @click.stop="deleteSession(s.id)">&times;</button>
+              <button class="session-delete" title="삭제" @click.stop="handleDeleteBuildSession(s)">&times;</button>
             </li>
           </ul>
         </section>
@@ -308,6 +308,25 @@ function handleGraphFilter(className) {
 
 function handleSchemaFilter(schemaName) {
   selectSchema(schemaName)
+}
+
+async function handleDeleteBuildSession(session) {
+  if (session.schema_name) {
+    const doDelete = confirm(
+      `"${session.schema_name}" 스키마와 연결된 대화입니다.\n` +
+      `대화와 함께 스키마의 모든 엔티티도 삭제하시겠습니까?\n\n` +
+      `[확인] = 대화 + 엔티티 삭제\n[취소] = 삭제 취소`
+    )
+    if (!doDelete) return
+    // Find the schema and delete its entities first
+    const schemaObj = schemas.value.find(s => s.name === session.schema_name)
+    if (schemaObj) {
+      await deleteSchemaEntities(schemaObj.id)
+    }
+  } else {
+    if (!confirm('이 대화를 삭제하시겠습니까?')) return
+  }
+  await deleteSession(session.id)
 }
 
 function handleDeleteSchemaEntities(schemaId) {
