@@ -38,6 +38,7 @@ def init_db() -> None:
             id          TEXT PRIMARY KEY,
             title       TEXT NOT NULL DEFAULT '',
             mode        TEXT NOT NULL DEFAULT '',
+            schema_name TEXT NOT NULL DEFAULT '',
             created_at  REAL NOT NULL,
             updated_at  REAL NOT NULL
         );
@@ -77,7 +78,14 @@ def init_db() -> None:
         conn.execute("SELECT mode FROM sessions LIMIT 1")
     except sqlite3.OperationalError:
         conn.execute("ALTER TABLE sessions ADD COLUMN mode TEXT NOT NULL DEFAULT ''")
+    # Migrate: add schema_name column if missing
+    try:
+        conn.execute("SELECT schema_name FROM sessions LIMIT 1")
+    except sqlite3.OperationalError:
+        conn.execute("ALTER TABLE sessions ADD COLUMN schema_name TEXT NOT NULL DEFAULT ''")
     conn.commit()
+    # Ensure ontology schema tables exist
+    _ensure_schema_tables()
 
 
 # ---------------------------------------------------------------------------
@@ -90,16 +98,16 @@ def list_sessions(mode_filter: str = "") -> list[dict[str, Any]]:
     conn = _get_conn()
     if mode_filter:
         rows = conn.execute(
-            "SELECT id, title, mode, created_at, updated_at FROM sessions "
+            "SELECT id, title, mode, schema_name, created_at, updated_at FROM sessions "
             "WHERE mode = ? ORDER BY updated_at DESC",
             (mode_filter,),
         ).fetchall()
     else:
         rows = conn.execute(
-            "SELECT id, title, mode, created_at, updated_at FROM sessions ORDER BY updated_at DESC"
+            "SELECT id, title, mode, schema_name, created_at, updated_at FROM sessions ORDER BY updated_at DESC"
         ).fetchall()
     return [
-        {"id": r[0], "title": r[1], "mode": r[2], "created_at": r[3], "updated_at": r[4]}
+        {"id": r[0], "title": r[1], "mode": r[2], "schema_name": r[3], "created_at": r[4], "updated_at": r[5]}
         for r in rows
     ]
 
@@ -109,15 +117,15 @@ def get_session(session_id: str) -> dict[str, Any] | None:
 
     conn = _get_conn()
     row = conn.execute(
-        "SELECT id, title, mode, created_at, updated_at FROM sessions WHERE id = ?",
+        "SELECT id, title, mode, schema_name, created_at, updated_at FROM sessions WHERE id = ?",
         (session_id,),
     ).fetchone()
     if row is None:
         return None
-    return {"id": row[0], "title": row[1], "mode": row[2], "created_at": row[3], "updated_at": row[4]}
+    return {"id": row[0], "title": row[1], "mode": row[2], "schema_name": row[3], "created_at": row[4], "updated_at": row[5]}
 
 
-def ensure_session(session_id: str, title: str = "", mode: str = "") -> dict[str, Any]:
+def ensure_session(session_id: str, title: str = "", mode: str = "", schema_name: str = "") -> dict[str, Any]:
     """Create session if it doesn't exist; return session metadata."""
 
     existing = get_session(session_id)
@@ -126,11 +134,11 @@ def ensure_session(session_id: str, title: str = "", mode: str = "") -> dict[str
     now = time.time()
     conn = _get_conn()
     conn.execute(
-        "INSERT INTO sessions (id, title, mode, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
-        (session_id, title, mode, now, now),
+        "INSERT INTO sessions (id, title, mode, schema_name, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+        (session_id, title, mode, schema_name, now, now),
     )
     conn.commit()
-    return {"id": session_id, "title": title, "mode": mode, "created_at": now, "updated_at": now}
+    return {"id": session_id, "title": title, "mode": mode, "schema_name": schema_name, "created_at": now, "updated_at": now}
 
 
 def update_session_title(session_id: str, title: str) -> None:
@@ -140,6 +148,17 @@ def update_session_title(session_id: str, title: str) -> None:
     conn.execute(
         "UPDATE sessions SET title = ?, updated_at = ? WHERE id = ?",
         (title, time.time(), session_id),
+    )
+    conn.commit()
+
+
+def update_session_schema_name(session_id: str, schema_name: str) -> None:
+    """Update the schema_name of an existing session."""
+
+    conn = _get_conn()
+    conn.execute(
+        "UPDATE sessions SET schema_name = ?, updated_at = ? WHERE id = ?",
+        (schema_name, time.time(), session_id),
     )
     conn.commit()
 
@@ -361,3 +380,274 @@ def load_build_context(session_id: str) -> str | None:
         (session_id,),
     ).fetchone()
     return row[0] if row else None
+
+
+# ---------------------------------------------------------------------------
+# Ontology Schema persistence (survives Neo4j resets)
+# ---------------------------------------------------------------------------
+
+def _ensure_schema_tables() -> None:
+    """Create ontology schema tables if they don't exist."""
+
+    conn = _get_conn()
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS ontology_schemas (
+            id          TEXT PRIMARY KEY,
+            name        TEXT NOT NULL UNIQUE,
+            description TEXT NOT NULL DEFAULT '',
+            created_at  REAL NOT NULL,
+            updated_at  REAL NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS schema_classes (
+            schema_id   TEXT NOT NULL,
+            class_name  TEXT NOT NULL,
+            description TEXT NOT NULL DEFAULT '',
+            properties  TEXT NOT NULL DEFAULT '[]',
+            created_at  REAL NOT NULL,
+            PRIMARY KEY (schema_id, class_name),
+            FOREIGN KEY (schema_id) REFERENCES ontology_schemas(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS schema_relationships (
+            schema_id   TEXT NOT NULL,
+            name        TEXT NOT NULL,
+            from_class  TEXT NOT NULL,
+            to_class    TEXT NOT NULL,
+            description TEXT NOT NULL DEFAULT '',
+            properties  TEXT NOT NULL DEFAULT '[]',
+            created_at  REAL NOT NULL,
+            PRIMARY KEY (schema_id, name, from_class, to_class),
+            FOREIGN KEY (schema_id) REFERENCES ontology_schemas(id) ON DELETE CASCADE
+        );
+    """)
+    conn.commit()
+
+
+import uuid as _uuid
+
+
+def create_schema(name: str, description: str = "") -> dict[str, Any]:
+    """Create or return an ontology schema group."""
+
+    _ensure_schema_tables()
+    conn = _get_conn()
+    # Check if already exists
+    row = conn.execute(
+        "SELECT id, name, description, created_at, updated_at FROM ontology_schemas WHERE name = ?",
+        (name,),
+    ).fetchone()
+    if row:
+        return {"id": row[0], "name": row[1], "description": row[2],
+                "created_at": row[3], "updated_at": row[4]}
+    schema_id = _uuid.uuid4().hex[:12]
+    now = time.time()
+    conn.execute(
+        "INSERT INTO ontology_schemas (id, name, description, created_at, updated_at) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (schema_id, name, description, now, now),
+    )
+    conn.commit()
+    return {"id": schema_id, "name": name, "description": description,
+            "created_at": now, "updated_at": now}
+
+
+def list_schemas() -> list[dict[str, Any]]:
+    """Return all ontology schemas with their class lists."""
+
+    _ensure_schema_tables()
+    conn = _get_conn()
+    schemas = conn.execute(
+        "SELECT id, name, description, created_at, updated_at "
+        "FROM ontology_schemas ORDER BY updated_at DESC"
+    ).fetchall()
+    result = []
+    for s in schemas:
+        classes = conn.execute(
+            "SELECT class_name, description, properties FROM schema_classes WHERE schema_id = ?",
+            (s[0],),
+        ).fetchall()
+        rels = conn.execute(
+            "SELECT name, from_class, to_class, description, properties "
+            "FROM schema_relationships WHERE schema_id = ?",
+            (s[0],),
+        ).fetchall()
+        result.append({
+            "id": s[0], "name": s[1], "description": s[2],
+            "created_at": s[3], "updated_at": s[4],
+            "classes": [
+                {"class_name": c[0], "description": c[1],
+                 "properties": json.loads(c[2]) if c[2] else []}
+                for c in classes
+            ],
+            "relationships": [
+                {"name": r[0], "from_class": r[1], "to_class": r[2],
+                 "description": r[3], "properties": json.loads(r[4]) if r[4] else []}
+                for r in rels
+            ],
+        })
+    return result
+
+
+def get_schema(schema_id: str) -> dict[str, Any] | None:
+    """Return a single ontology schema with classes and relationships."""
+
+    _ensure_schema_tables()
+    conn = _get_conn()
+    row = conn.execute(
+        "SELECT id, name, description, created_at, updated_at "
+        "FROM ontology_schemas WHERE id = ?",
+        (schema_id,),
+    ).fetchone()
+    if not row:
+        return None
+    classes = conn.execute(
+        "SELECT class_name, description, properties FROM schema_classes WHERE schema_id = ?",
+        (schema_id,),
+    ).fetchall()
+    rels = conn.execute(
+        "SELECT name, from_class, to_class, description, properties "
+        "FROM schema_relationships WHERE schema_id = ?",
+        (schema_id,),
+    ).fetchall()
+    return {
+        "id": row[0], "name": row[1], "description": row[2],
+        "created_at": row[3], "updated_at": row[4],
+        "classes": [
+            {"class_name": c[0], "description": c[1],
+             "properties": json.loads(c[2]) if c[2] else []}
+            for c in classes
+        ],
+        "relationships": [
+            {"name": r[0], "from_class": r[1], "to_class": r[2],
+             "description": r[3], "properties": json.loads(r[4]) if r[4] else []}
+            for r in rels
+        ],
+    }
+
+
+def get_schema_by_name(name: str) -> dict[str, Any] | None:
+    """Return a schema by name."""
+
+    _ensure_schema_tables()
+    conn = _get_conn()
+    row = conn.execute(
+        "SELECT id FROM ontology_schemas WHERE name = ?", (name,),
+    ).fetchone()
+    if not row:
+        return None
+    return get_schema(row[0])
+
+
+def delete_schema(schema_id: str) -> None:
+    """Delete an ontology schema and its class/relationship metadata (CASCADE)."""
+
+    conn = _get_conn()
+    conn.execute("DELETE FROM ontology_schemas WHERE id = ?", (schema_id,))
+    conn.commit()
+
+
+def add_class_to_schema(
+    schema_id: str, class_name: str,
+    description: str = "", properties_json: str = "[]",
+) -> None:
+    """Add or update a class in a schema."""
+
+    _ensure_schema_tables()
+    conn = _get_conn()
+    now = time.time()
+    conn.execute(
+        "INSERT INTO schema_classes (schema_id, class_name, description, properties, created_at) "
+        "VALUES (?, ?, ?, ?, ?) "
+        "ON CONFLICT(schema_id, class_name) DO UPDATE SET "
+        "description = excluded.description, properties = excluded.properties",
+        (schema_id, class_name, description, properties_json, now),
+    )
+    conn.execute(
+        "UPDATE ontology_schemas SET updated_at = ? WHERE id = ?",
+        (now, schema_id),
+    )
+    conn.commit()
+
+
+def remove_class_from_schema(schema_id: str, class_name: str) -> None:
+    """Remove a class from a schema."""
+
+    conn = _get_conn()
+    conn.execute(
+        "DELETE FROM schema_classes WHERE schema_id = ? AND class_name = ?",
+        (schema_id, class_name),
+    )
+    conn.commit()
+
+
+def list_classes_for_schema(schema_id: str) -> list[dict[str, Any]]:
+    """Return all classes belonging to a schema."""
+
+    _ensure_schema_tables()
+    conn = _get_conn()
+    rows = conn.execute(
+        "SELECT class_name, description, properties FROM schema_classes WHERE schema_id = ?",
+        (schema_id,),
+    ).fetchall()
+    return [
+        {"class_name": r[0], "description": r[1],
+         "properties": json.loads(r[2]) if r[2] else []}
+        for r in rows
+    ]
+
+
+def find_schemas_for_class(class_name: str) -> list[dict[str, Any]]:
+    """Find all schemas that contain a given class name (for merge detection)."""
+
+    _ensure_schema_tables()
+    conn = _get_conn()
+    rows = conn.execute(
+        "SELECT s.id, s.name, s.description "
+        "FROM ontology_schemas s "
+        "JOIN schema_classes sc ON s.id = sc.schema_id "
+        "WHERE sc.class_name = ?",
+        (class_name,),
+    ).fetchall()
+    return [{"id": r[0], "name": r[1], "description": r[2]} for r in rows]
+
+
+def add_relationship_to_schema(
+    schema_id: str, name: str, from_class: str, to_class: str,
+    description: str = "", properties_json: str = "[]",
+) -> None:
+    """Add or update a relationship type in a schema."""
+
+    _ensure_schema_tables()
+    conn = _get_conn()
+    now = time.time()
+    conn.execute(
+        "INSERT INTO schema_relationships "
+        "(schema_id, name, from_class, to_class, description, properties, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT(schema_id, name, from_class, to_class) DO UPDATE SET "
+        "description = excluded.description, properties = excluded.properties",
+        (schema_id, name, from_class, to_class, description, properties_json, now),
+    )
+    conn.execute(
+        "UPDATE ontology_schemas SET updated_at = ? WHERE id = ?",
+        (now, schema_id),
+    )
+    conn.commit()
+
+
+def list_relationships_for_schema(schema_id: str) -> list[dict[str, Any]]:
+    """Return all relationship types belonging to a schema."""
+
+    _ensure_schema_tables()
+    conn = _get_conn()
+    rows = conn.execute(
+        "SELECT name, from_class, to_class, description, properties "
+        "FROM schema_relationships WHERE schema_id = ?",
+        (schema_id,),
+    ).fetchall()
+    return [
+        {"name": r[0], "from_class": r[1], "to_class": r[2],
+         "description": r[3], "properties": json.loads(r[4]) if r[4] else []}
+        for r in rows
+    ]

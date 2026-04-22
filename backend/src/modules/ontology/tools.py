@@ -132,8 +132,15 @@ def schema_create_class(
     name: str,
     description: str = "",
     properties: str = "[]",
+    schema_name: str = "",
 ) -> str:
-    """Create or update an ontology class."""
+    """Create or update an ontology class. If schema_name is provided, also registers the class in that SQLite schema group."""
+
+    from ..agent_session.session_store import (
+        add_class_to_schema,
+        find_schemas_for_class,
+        get_schema_by_name,
+    )
 
     try:
         props = json.loads(properties) if properties else []
@@ -151,14 +158,33 @@ def schema_create_class(
                 "properties": json.dumps(props, ensure_ascii=False),
             },
         )
+
+        result: dict[str, Any] = {"status": "ok"}
         if rows:
             node = rows[0]["c"]
-            return json.dumps(
-                {"status": "ok", "class": _node_to_dict(node)},
-                ensure_ascii=False,
-                default=str,
-            )
-        return json.dumps({"status": "ok", "class": name}, ensure_ascii=False)
+            result["class"] = _node_to_dict(node)
+        else:
+            result["class"] = name
+
+        # Register in SQLite schema group if schema_name provided
+        if schema_name:
+            schema = get_schema_by_name(schema_name)
+            if schema:
+                # Check for merge: does this class exist in other schemas?
+                existing_schemas = find_schemas_for_class(name)
+                other_schemas = [s for s in existing_schemas if s["name"] != schema_name]
+                if other_schemas:
+                    result["merge_warning"] = (
+                        f"클래스 '{name}'이(가) 이미 스키마 "
+                        f"'{', '.join(s['name'] for s in other_schemas)}'에 존재합니다. "
+                        f"병합되었습니다."
+                    )
+                add_class_to_schema(
+                    schema["id"], name, description,
+                    json.dumps(props, ensure_ascii=False),
+                )
+
+        return json.dumps(result, ensure_ascii=False, default=str)
     except Exception as exc:  # pragma: no cover - passthrough error handling
         return json.dumps({"error": str(exc)}, ensure_ascii=False)
 
@@ -169,8 +195,14 @@ def schema_create_relationship_type(
     to_class: str,
     description: str = "",
     properties: str = "[]",
+    schema_name: str = "",
 ) -> str:
-    """Define an ontology relationship type."""
+    """Define an ontology relationship type. If schema_name is provided, also registers in SQLite schema group."""
+
+    from ..agent_session.session_store import (
+        add_relationship_to_schema,
+        get_schema_by_name,
+    )
 
     try:
         props = json.loads(properties) if properties else []
@@ -198,6 +230,14 @@ def schema_create_relationship_type(
         )
         if rows:
             node = rows[0]["r"]
+            # Register in SQLite schema group
+            if schema_name:
+                schema = get_schema_by_name(schema_name)
+                if schema:
+                    add_relationship_to_schema(
+                        schema["id"], name, from_class, to_class,
+                        description, json.dumps(props, ensure_ascii=False),
+                    )
             return json.dumps(
                 {"status": "ok", "relationship_type": _node_to_dict(node)},
                 ensure_ascii=False,
@@ -291,17 +331,29 @@ def schema_get() -> str:
             )
         schema_relationships.sort(key=lambda item: item["name"])
 
+        # Add SQLite schema group info
+        from ..agent_session.session_store import list_schemas as _list_schemas
+        try:
+            sqlite_schemas = _list_schemas()
+        except Exception:
+            sqlite_schemas = []
+
         return json.dumps(
             {
                 "classes": schema_classes,
                 "relationships": schema_relationships,
+                "schemas": [
+                    {"name": s["name"], "description": s["description"],
+                     "class_names": [c["class_name"] for c in s.get("classes", [])]}
+                    for s in sqlite_schemas
+                ],
             },
             ensure_ascii=False,
             default=str,
         )
     except Exception as exc:  # pragma: no cover - passthrough error handling
         return json.dumps(
-            {"classes": [], "relationships": [], "error": str(exc)},
+            {"classes": [], "relationships": [], "schemas": [], "error": str(exc)},
             ensure_ascii=False,
         )
 
@@ -448,8 +500,8 @@ def relationship_create(
         return json.dumps({"error": str(exc)}, ensure_ascii=False)
 
 
-def batch_ingest(nodes_json: str) -> str:
-    """Batch-ingest nodes and relationships from a parsed JSON file path or JSON string containing nodes and relationships arrays."""
+def batch_ingest(nodes_json: str, schema_name: str = "") -> str:
+    """Batch-ingest nodes and relationships from a parsed JSON file path or JSON string. If schema_name is provided, registers used classes in that SQLite schema group."""
 
     import os
     from pathlib import Path
@@ -574,6 +626,18 @@ def batch_ingest(nodes_json: str) -> str:
         except Exception as embed_exc:
             errors.append(f"임베딩: {embed_exc}")
 
+        # Register used classes in SQLite schema group
+        if schema_name:
+            from ..agent_session.session_store import (
+                add_class_to_schema,
+                get_schema_by_name,
+            )
+            schema = get_schema_by_name(schema_name)
+            if schema:
+                used_classes = {n.get("class", "") for n in nodes if n.get("class")}
+                for cls_name in used_classes:
+                    add_class_to_schema(schema["id"], cls_name)
+
         result = {
             "status": "ok",
             "nodes_created": node_count,
@@ -671,6 +735,44 @@ def graph_stats() -> str:
             "nodes_by_class": [{"class": r["class"], "count": r["count"]} for r in node_stats],
             "relationships_by_type": [{"type": r["type"], "count": r["count"]} for r in rel_stats],
         }, ensure_ascii=False)
+    except Exception as exc:
+        return json.dumps({"error": str(exc)}, ensure_ascii=False)
+
+
+def schema_group_create(name: str, description: str = "") -> str:
+    """Create an ontology schema group in SQLite. Returns the schema metadata."""
+
+    from ..agent_session.session_store import create_schema
+
+    try:
+        schema = create_schema(name, description)
+        return json.dumps({"status": "ok", "schema": schema}, ensure_ascii=False, default=str)
+    except Exception as exc:
+        return json.dumps({"error": str(exc)}, ensure_ascii=False)
+
+
+def schema_group_list() -> str:
+    """List all ontology schema groups with their classes and entity counts from Neo4j."""
+
+    from ..agent_session.session_store import list_schemas as _list_schemas
+
+    try:
+        sqlite_schemas = _list_schemas()
+        # Enrich with Neo4j entity counts per class
+        for schema in sqlite_schemas:
+            total_entities = 0
+            for cls in schema.get("classes", []):
+                try:
+                    rows = _run_readonly_query(
+                        f"MATCH (n:_Entity:{cls['class_name']}) RETURN count(n) AS cnt"
+                    )
+                    cnt = rows[0]["cnt"] if rows else 0
+                    cls["entity_count"] = cnt
+                    total_entities += cnt
+                except Exception:
+                    cls["entity_count"] = 0
+            schema["total_entity_count"] = total_entities
+        return json.dumps({"schemas": sqlite_schemas}, ensure_ascii=False, default=str)
     except Exception as exc:
         return json.dumps({"error": str(exc)}, ensure_ascii=False)
 

@@ -20,9 +20,18 @@
     </div>
 
     <div class="graph-filter" v-if="viewMode === 'entity'">
+      <select
+        v-if="schemas.length"
+        v-model="schemaFilter"
+        class="class-filter-select"
+        @change="$emit('schema-filter', schemaFilter)"
+      >
+        <option value="">전체 스키마</option>
+        <option v-for="s in schemas" :key="s.id" :value="s.name">{{ s.name }}</option>
+      </select>
       <select v-model="selectedClass" class="class-filter-select" @change="$emit('filter', selectedClass)">
         <option value="">전체 클래스</option>
-        <option v-for="cls in schema.classes" :key="cls.name" :value="cls.name">{{ cls.name }}</option>
+        <option v-for="cls in filteredClasses" :key="cls.name" :value="cls.name">{{ cls.name }}</option>
       </select>
     </div>
 
@@ -64,11 +73,13 @@ const props = defineProps({
   apiBase: { type: String, default: 'http://localhost:8000' },
   graphData: { type: Object, required: true },
   schema: { type: Object, required: true },
+  schemas: { type: Array, default: () => [] },
+  selectedSchema: { type: String, default: null },
   entityCounts: { type: Array, default: () => [] },
   traversedNodeIds: { type: Array, default: () => [] },
 })
 
-const emit = defineEmits(['refresh', 'filter'])
+const emit = defineEmits(['refresh', 'filter', 'schema-filter'])
 
 const viewModes = [
   { key: 'schema', label: '스키마' },
@@ -86,11 +97,21 @@ const layoutOptions = [
 const viewMode = ref('schema')
 const layoutName = ref('circle')
 const selectedClass = ref('')
+const schemaFilter = ref('')
 const selectedNode = ref(null)
 const cyContainer = ref(null)
 let cy = null
 // Track expanded nodes: nodeId -> Set of element IDs added by that expansion
 const expandedNodes = reactive(new Map())
+
+// Filter classes by selected schema
+const filteredClasses = computed(() => {
+  if (!schemaFilter.value) return props.schema.classes || []
+  const schemaObj = props.schemas.find(s => s.name === schemaFilter.value)
+  if (!schemaObj) return props.schema.classes || []
+  const schemaClassNames = new Set((schemaObj.classes || []).map(c => c.class_name))
+  return (props.schema.classes || []).filter(c => schemaClassNames.has(c.name))
+})
 
 // Color palette for class nodes
 const CLASS_COLORS = [

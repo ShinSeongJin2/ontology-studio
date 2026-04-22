@@ -5,7 +5,7 @@ from __future__ import annotations
 from fastapi import APIRouter, File, Form, UploadFile
 from fastapi.responses import FileResponse
 
-from .service import copy_output_file, list_workspace_files, save_uploads
+from .service import copy_output_file, delete_upload_file, list_workspace_files, save_uploads
 
 router = APIRouter(tags=["files"])
 
@@ -27,6 +27,15 @@ async def list_files():
     """List uploaded and generated files."""
 
     return list_workspace_files()
+
+
+@router.delete("/api/files/{filename:path}")
+async def delete_file(filename: str):
+    """Delete an uploaded file."""
+    deleted = delete_upload_file(filename)
+    if deleted:
+        return {"status": "ok", "filename": filename}
+    return {"status": "not_found", "filename": filename}
 
 
 @router.get("/api/download/{filename:path}")

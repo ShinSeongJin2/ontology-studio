@@ -111,6 +111,8 @@ export function useOntologyStudio() {
   const entityCounts = ref([])
   const graphData = ref({ nodes: [], edges: [] })
   const traversedNodeIds = ref([])
+  const schemas = ref([])
+  const selectedSchema = ref(null)
   const currentModeMeta = computed(() => MODES[mode.value])
   const inputText = computed({
     get: () => modeState[mode.value].draft,
@@ -126,6 +128,8 @@ export function useOntologyStudio() {
   const showFilePanel = computed(() => currentModeMeta.value.allowsFiles)
   const buildSessions = computed(() => sessions.value.filter(s => s.mode !== 'answer'))
   const answerSessions = computed(() => sessions.value.filter(s => s.mode === 'answer'))
+  const targetSchema = ref('')
+  const newSchemaName = ref('')
   const buildBrief = computed(() => modeState.build.buildBrief)
   const buildIntent = computed({
     get: () => buildBrief.value.intent,
@@ -252,11 +256,17 @@ export function useOntologyStudio() {
   }
 
   function createBuildContext(reviewFeedback = []) {
-    return {
+    const ctx = {
       intent: buildIntent.value.trim(),
       golden_questions: [...normalizedBuildGoldenQuestions.value],
       review_feedback: reviewFeedback,
     }
+    // Include target schema info for the agent
+    const schemaName = targetSchema.value || newSchemaName.value || ''
+    if (schemaName) {
+      ctx.target_schema = schemaName
+    }
+    return ctx
   }
 
   function replaceAssistantText(message, text) {
@@ -437,11 +447,45 @@ export function useOntologyStudio() {
     try {
       const params = new URLSearchParams()
       if (className) params.set('class_name', className)
+      if (selectedSchema.value) params.set('schema_name', selectedSchema.value)
       params.set('limit', String(limit))
       const res = await fetch(`${API}/api/graph?${params}`)
       graphData.value = await res.json()
     } catch {
       graphData.value = { nodes: [], edges: [] }
+    }
+  }
+
+  async function fetchSchemas() {
+    try {
+      const res = await fetch(`${API}/api/schemas`)
+      const data = await res.json()
+      schemas.value = data.schemas || []
+    } catch {
+      schemas.value = []
+    }
+  }
+
+  async function selectSchema(schemaName) {
+    selectedSchema.value = schemaName || null
+    await fetchGraphData()
+  }
+
+  async function deleteSchemaEntities(schemaId) {
+    try {
+      await fetch(`${API}/api/schemas/${schemaId}/entities`, { method: 'DELETE' })
+      await refreshSchema()
+    } catch {
+      // ignore
+    }
+  }
+
+  async function rebuildSchema(schemaId) {
+    try {
+      await fetch(`${API}/api/schemas/${schemaId}/rebuild`, { method: 'POST' })
+      await refreshSchema()
+    } catch {
+      // ignore
     }
   }
 
@@ -454,6 +498,7 @@ export function useOntologyStudio() {
         relationships: data.relationships || [],
       }
       await refreshEntityCounts()
+      await fetchSchemas()
       await fetchGraphData()
     } catch {
       // ignore
@@ -514,6 +559,11 @@ export function useOntologyStudio() {
     window.open(`${API}/api/download/${encodeURIComponent(name)}`, '_blank')
   }
 
+  async function deleteUploadFile(name) {
+    await fetch(`${API}/api/files/${encodeURIComponent(name)}`, { method: 'DELETE' })
+    await refreshFiles()
+  }
+
   function autoUpdateSessionTitle(currentMode, prompt) {
     // Count total user messages across all modes
     const totalUserMsgs = MODE_KEYS.reduce(
@@ -522,9 +572,16 @@ export function useOntologyStudio() {
     )
     // Only set title on the very first user message of the session
     if (totalUserMsgs === 1 && prompt) {
-      const title = prompt.length > 30 ? prompt.slice(0, 30) + '...' : prompt
+      const rawTitle = prompt.length > 30 ? prompt.slice(0, 30) + '...' : prompt
+      const title = rawTitle
+      const params = new URLSearchParams({ title })
+      // Also update schema_name if build mode
+      if (currentMode === 'build') {
+        const schemaName = targetSchema.value || newSchemaName.value || ''
+        if (schemaName) params.set('schema_name', schemaName)
+      }
       fetch(
-        `${API}/api/sessions/${encodeURIComponent(sessionId.value)}?title=${encodeURIComponent(title)}`,
+        `${API}/api/sessions/${encodeURIComponent(sessionId.value)}?${params}`,
         { method: 'PATCH' }
       ).then(() => fetchSessions()).catch(() => {})
     }
@@ -533,7 +590,11 @@ export function useOntologyStudio() {
   async function ensureSessionOnServer() {
     if (sessionId.value.startsWith('pending_')) {
       const currentMode = mode.value
+      const schemaName = currentMode === 'build'
+        ? (targetSchema.value || newSchemaName.value || '')
+        : ''
       const params = new URLSearchParams({ title: '새 대화', mode: currentMode })
+      if (schemaName) params.set('schema_name', schemaName)
       const res = await fetch(`${API}/api/sessions?${params}`, { method: 'POST' })
       const session = await res.json()
       sessionId.value = session.id
@@ -865,6 +926,12 @@ export function useOntologyStudio() {
     if (session?.mode && MODES[session.mode]) {
       mode.value = session.mode
     }
+    // Auto-select associated schema for build sessions
+    if (session?.schema_name) {
+      selectedSchema.value = session.schema_name
+    } else {
+      selectedSchema.value = null
+    }
     await loadSessionMessages(targetSessionId)
     await refreshAll()
   }
@@ -925,6 +992,7 @@ export function useOntologyStudio() {
     createNewSession,
     currentModeMeta,
     deleteSession,
+    deleteUploadFile,
     doUploadAndNotify,
     downloadFile,
     effectiveInputPlaceholder,
@@ -948,6 +1016,11 @@ export function useOntologyStudio() {
     removeBuildGoldenQuestion,
     resetSession,
     schema,
+    schemas,
+    selectedSchema,
+    selectSchema,
+    deleteSchemaEntities,
+    rebuildSchema,
     send,
     sessionId,
     sessions,
@@ -958,6 +1031,8 @@ export function useOntologyStudio() {
     stopStreaming,
     submitBuildFeedback,
     switchSession,
+    targetSchema,
+    newSchemaName,
     todos,
     traversedNodeIds,
     uploadedFiles,

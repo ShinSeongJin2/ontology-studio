@@ -6,7 +6,7 @@ import json
 
 from fastapi import APIRouter
 
-from .tools import get_driver, schema_get
+from .tools import get_driver, schema_get, _run_query
 
 router = APIRouter(tags=["ontology"])
 
@@ -49,11 +49,165 @@ async def clear_all_neo4j():
         return {"status": "error", "error": str(exc)}
 
 
+@router.get("/api/schemas")
+async def list_schemas_endpoint():
+    """Return all ontology schema groups with class lists and entity counts."""
+
+    from ..agent_session.session_store import list_schemas
+
+    try:
+        schemas = list_schemas()
+        # Enrich with Neo4j entity counts
+        driver = get_driver()
+        for schema in schemas:
+            total = 0
+            for cls in schema.get("classes", []):
+                try:
+                    with driver.session() as sess:
+                        result = sess.run(
+                            f"MATCH (n:_Entity:{cls['class_name']}) RETURN count(n) AS cnt"
+                        ).single()
+                        cnt = result["cnt"] if result else 0
+                        cls["entity_count"] = cnt
+                        total += cnt
+                except Exception:
+                    cls["entity_count"] = 0
+            schema["total_entity_count"] = total
+        return {"schemas": schemas}
+    except Exception as exc:
+        return {"schemas": [], "error": str(exc)}
+
+
+@router.get("/api/schemas/{schema_id}")
+async def get_schema_detail(schema_id: str):
+    """Return a single schema group detail."""
+
+    from ..agent_session.session_store import get_schema
+
+    schema = get_schema(schema_id)
+    if not schema:
+        return {"error": "스키마를 찾을 수 없습니다."}
+    return schema
+
+
+@router.delete("/api/schemas/{schema_id}")
+async def delete_schema_endpoint(schema_id: str):
+    """Delete a schema group (metadata only, entities preserved)."""
+
+    from ..agent_session.session_store import delete_schema
+
+    try:
+        delete_schema(schema_id)
+        return {"status": "ok"}
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
+@router.delete("/api/schemas/{schema_id}/entities")
+async def delete_schema_entities(schema_id: str):
+    """Delete all Neo4j entities belonging to a schema's classes."""
+
+    from ..agent_session.session_store import get_schema
+
+    try:
+        schema = get_schema(schema_id)
+        if not schema:
+            return {"error": "스키마를 찾을 수 없습니다."}
+
+        class_names = [c["class_name"] for c in schema.get("classes", [])]
+        if not class_names:
+            return {"status": "ok", "deleted": 0}
+
+        total_deleted = 0
+        for cls_name in class_names:
+            rows = _run_query(
+                f"MATCH (n:_Entity:{cls_name}) DETACH DELETE n RETURN count(n) AS cnt"
+            )
+            total_deleted += rows[0]["cnt"] if rows else 0
+
+        return {"status": "ok", "deleted": total_deleted}
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
+@router.post("/api/schemas/{schema_id}/rebuild")
+async def rebuild_schema_in_neo4j(schema_id: str):
+    """Rebuild Neo4j _OntologyClass and _OntologyRelationshipType nodes from SQLite schema."""
+
+    from ..agent_session.session_store import get_schema
+
+    try:
+        schema = get_schema(schema_id)
+        if not schema:
+            return {"error": "스키마를 찾을 수 없습니다."}
+
+        classes_created = 0
+        rels_created = 0
+
+        for cls in schema.get("classes", []):
+            _run_query(
+                """
+                MERGE (c:_OntologyClass {name: $name})
+                SET c.description = $description,
+                    c.properties = $properties,
+                    c.updated_at = datetime()
+                """,
+                {
+                    "name": cls["class_name"],
+                    "description": cls.get("description", ""),
+                    "properties": json.dumps(cls.get("properties", []), ensure_ascii=False),
+                },
+            )
+            classes_created += 1
+
+        for rel in schema.get("relationships", []):
+            _run_query(
+                """
+                MATCH (from_c:_OntologyClass {name: $from_class})
+                MATCH (to_c:_OntologyClass {name: $to_class})
+                MERGE (r:_OntologyRelationshipType {name: $name})
+                SET r.description = $description,
+                    r.from_class = $from_class,
+                    r.to_class = $to_class,
+                    r.properties = $properties,
+                    r.updated_at = datetime()
+                MERGE (r)-[:FROM_CLASS]->(from_c)
+                MERGE (r)-[:TO_CLASS]->(to_c)
+                """,
+                {
+                    "name": rel["name"],
+                    "from_class": rel["from_class"],
+                    "to_class": rel["to_class"],
+                    "description": rel.get("description", ""),
+                    "properties": json.dumps(rel.get("properties", []), ensure_ascii=False),
+                },
+            )
+            rels_created += 1
+
+        return {
+            "status": "ok",
+            "classes_created": classes_created,
+            "relationships_created": rels_created,
+        }
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
 @router.get("/api/graph")
-async def get_graph(class_name: str = "", limit: int = 100):
+async def get_graph(class_name: str = "", schema_name: str = "", limit: int = 100):
     """Return graph nodes and edges, optionally filtered by class."""
 
     try:
+        # Resolve schema_name to class list if provided
+        filter_classes = []
+        if schema_name:
+            from ..agent_session.session_store import get_schema_by_name
+            schema = get_schema_by_name(schema_name)
+            if schema:
+                filter_classes = [c["class_name"] for c in schema.get("classes", [])]
+            if not filter_classes:
+                return {"nodes": [], "edges": []}
+
         driver = get_driver()
         with driver.session() as session:
             if class_name:
@@ -62,6 +216,14 @@ async def get_graph(class_name: str = "", limit: int = 100):
                     "OPTIONAL MATCH (n)-[r]->(m:_Entity) "
                     "RETURN n, r, m LIMIT $limit",
                     {"class": class_name, "limit": limit},
+                )
+            elif filter_classes:
+                # Filter by schema's classes
+                result = session.run(
+                    "MATCH (n:_Entity) WHERE any(lbl IN labels(n) WHERE lbl IN $classes) "
+                    "OPTIONAL MATCH (n)-[r]->(m:_Entity) "
+                    "RETURN n, r, m LIMIT $limit",
+                    {"classes": filter_classes, "limit": limit},
                 )
             else:
                 result = session.run(

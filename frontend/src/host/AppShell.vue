@@ -28,6 +28,7 @@
               :class="{ active: s.id === sessionId }"
               @click="switchSession(s.id)"
             >
+              <span v-if="s.schema_name" class="session-schema-badge">{{ s.schema_name }}</span>
               <span class="session-title">{{ s.title || '새 대화' }}</span>
               <span class="session-date">{{ formatSessionDate(s.updated_at) }}</span>
               <button class="session-delete" title="삭제" @click.stop="deleteSession(s.id)">&times;</button>
@@ -61,6 +62,13 @@
         </section>
       </div>
 
+      <FilePanel
+        :uploaded-files="uploadedFiles"
+        :output-files="outputFiles"
+        @delete-file="handleDeleteFile"
+        @download="downloadFile"
+      />
+
       <div class="sidebar-footer">
         <button class="btn-reset btn-danger" @click="confirmClearNeo4j">Neo4j 전체 초기화</button>
       </div>
@@ -74,12 +82,17 @@
         :intent="buildIntent"
         :is-streaming="isStreaming"
         :uploaded-files="uploadedFiles"
+        :schemas="schemas"
+        :target-schema="targetSchema"
+        :new-schema-name="newSchemaName"
         @add-question="addBuildGoldenQuestion"
         @import-questions="importBuildGoldenQuestions"
         @remove-question="removeBuildGoldenQuestion"
         @start-build="send"
         @update:intent="buildIntent = $event"
         @update:question="setBuildGoldenQuestion"
+        @update:targetSchema="targetSchema = $event"
+        @update:newSchemaName="newSchemaName = $event"
         @upload="doUploadAndNotify"
       />
 
@@ -130,8 +143,11 @@
           :entity-counts="entityCounts"
           :graph-data="graphData"
           :schema="schema"
+          :schemas="schemas"
+          :selected-schema="selectedSchema"
           :traversed-node-ids="traversedNodeIds"
           @filter="handleGraphFilter"
+          @schema-filter="handleSchemaFilter"
           @refresh="fetchGraphData"
         />
       </div>
@@ -145,7 +161,12 @@
           :entity-counts="entityCounts"
           :open="panelOpen.schema"
           :schema="schema"
+          :schemas="schemas"
+          :selected-schema="selectedSchema"
           @toggle="panelOpen.schema = !panelOpen.schema"
+          @select-schema="handleSchemaFilter"
+          @delete-schema-entities="handleDeleteSchemaEntities"
+          @rebuild-schema="handleRebuildSchema"
         />
         <ContextPanel
           :open="panelOpen.context"
@@ -160,6 +181,7 @@
 
 <script setup>
 import ChatPanel from '../features/chat/ChatPanel.vue'
+import FilePanel from '../features/files/FilePanel.vue'
 import OntologyBuildBriefPanel from '../features/ontology/OntologyBuildBriefPanel.vue'
 import OntologyGraphPanel from '../features/ontology/OntologyGraphPanel.vue'
 import OntologySchemaPanel from '../features/ontology/OntologySchemaPanel.vue'
@@ -183,6 +205,7 @@ const {
   createNewSession,
   currentModeMeta,
   deleteSession,
+  deleteUploadFile,
   doUploadAndNotify,
   downloadFile,
   effectiveInputPlaceholder,
@@ -205,6 +228,11 @@ const {
   removeBuildGoldenQuestion,
   resetSession,
   schema,
+  schemas,
+  selectedSchema,
+  selectSchema,
+  deleteSchemaEntities,
+  rebuildSchema,
   send,
   sessionId,
   sessions,
@@ -215,6 +243,8 @@ const {
   stopStreaming,
   submitBuildFeedback,
   switchSession,
+  targetSchema,
+  newSchemaName,
   todos,
   traversedNodeIds,
   uploadedFiles,
@@ -276,6 +306,20 @@ function handleGraphFilter(className) {
   fetchGraphData(className)
 }
 
+function handleSchemaFilter(schemaName) {
+  selectSchema(schemaName)
+}
+
+function handleDeleteSchemaEntities(schemaId) {
+  if (confirm('이 스키마의 모든 엔티티를 삭제하시겠습니까? (스키마 정의는 보존됩니다)')) {
+    deleteSchemaEntities(schemaId)
+  }
+}
+
+function handleRebuildSchema(schemaId) {
+  rebuildSchema(schemaId)
+}
+
 function formatSessionDate(timestamp) {
   if (!timestamp) return ''
   const d = new Date(timestamp * 1000)
@@ -289,6 +333,10 @@ function formatSessionDate(timestamp) {
 
 async function handleNewSession() {
   await createNewSession()
+}
+
+async function handleDeleteFile(filename) {
+  await deleteUploadFile(filename)
 }
 
 async function confirmClearNeo4j() {

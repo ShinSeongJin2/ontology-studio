@@ -17,6 +17,7 @@ from .session_store import (
     load_frontend_state,
     save_frontend_state,
     update_session_title,
+    update_session_schema_name,
 )
 
 router = APIRouter(tags=["agent-session"])
@@ -65,11 +66,11 @@ async def get_sessions():
 
 
 @router.post("/api/sessions")
-async def create_session(title: str = "", mode: str = ""):
+async def create_session(title: str = "", mode: str = "", schema_name: str = ""):
     """Create a new session and return its metadata."""
 
     session_id = uuid.uuid4().hex[:12]
-    session = ensure_session(session_id, title=title or "새 대화", mode=mode)
+    session = ensure_session(session_id, title=title or "새 대화", mode=mode, schema_name=schema_name)
     return session
 
 
@@ -83,11 +84,13 @@ async def remove_session(session_id: str):
 
 
 @router.patch("/api/sessions/{session_id}")
-async def patch_session(session_id: str, title: str = ""):
-    """Update session title."""
+async def patch_session(session_id: str, title: str = "", schema_name: str = ""):
+    """Update session title and/or schema_name."""
 
     if title:
         update_session_title(session_id, title)
+    if schema_name:
+        update_session_schema_name(session_id, schema_name)
     return {"status": "ok"}
 
 

@@ -688,6 +688,20 @@ body {
   color: var(--accent);
 }
 
+.session-schema-badge {
+  display: inline-block;
+  background: rgba(0, 120, 255, 0.2);
+  color: #4da6ff;
+  font-size: 10px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  flex-shrink: 0;
+  max-width: 80px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .session-title {
   flex: 1;
   overflow: hidden;
@@ -839,6 +853,74 @@ body {
   display: flex;
   flex-direction: column;
   gap: 6px;
+}
+
+/* File panel in sidebar */
+.file-panel-section {
+  padding: 8px 12px;
+  border-top: 1px solid var(--border);
+}
+.file-panel-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  cursor: pointer;
+  user-select: none;
+  margin-bottom: 4px;
+}
+.file-panel-toggle {
+  display: inline-block;
+  width: 14px;
+  font-size: 10px;
+}
+.file-panel-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.file-panel-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 4px;
+  border-radius: 4px;
+  font-size: 12px;
+  color: var(--text-primary);
+}
+.file-panel-item:hover {
+  background: var(--bg-hover);
+}
+.file-panel-item .file-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.file-panel-item .file-size {
+  font-size: 10px;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+.file-delete-btn {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 14px;
+  padding: 0 2px;
+  line-height: 1;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+.file-panel-item:hover .file-delete-btn {
+  opacity: 1;
+}
+.file-delete-btn:hover {
+  color: #e74c3c;
+}
+.file-dl {
+  cursor: pointer;
 }
 
 .workspace-main {
