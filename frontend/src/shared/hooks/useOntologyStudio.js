@@ -1,7 +1,6 @@
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref } from 'vue'
 
 const API = import.meta.env.VITE_API_BASE || 'http://localhost:8000'
-const SESSION_ID = 'default'
 const DEFAULT_BUILD_PROMPT = '업로드된 문서를 바탕으로 Golden Question에 답할 수 있는 온톨로지를 구축해줘.'
 const DEFAULT_REVIEW_PROMPT = '방금 검토 피드백을 반영해서 Golden Question에 더 잘 답할 수 있도록 온톨로지를 개선해줘.'
 
@@ -99,6 +98,8 @@ export function useOntologyStudio() {
   const isStreaming = ref(false)
   const uploadedFiles = ref([])
   const outputFiles = ref([])
+  const sessionId = ref('default')
+  const sessions = ref([])
   const panelOpen = reactive({
     todos: true,
     context: true,
@@ -108,6 +109,10 @@ export function useOntologyStudio() {
   const neo4jConnected = ref(false)
   const schema = ref({ classes: [], relationships: [] })
   const entityCounts = ref([])
+  const graphData = ref({ nodes: [], edges: [] })
+  const traversedNodeIds = ref([])
+  const schemas = ref([])
+  const selectedSchema = ref(null)
   const currentModeMeta = computed(() => MODES[mode.value])
   const inputText = computed({
     get: () => modeState[mode.value].draft,
@@ -121,6 +126,10 @@ export function useOntologyStudio() {
   const refFiles = computed(() => modeState[mode.value].refFiles)
   const examples = computed(() => currentModeMeta.value.examples)
   const showFilePanel = computed(() => currentModeMeta.value.allowsFiles)
+  const buildSessions = computed(() => sessions.value.filter(s => s.mode !== 'answer'))
+  const answerSessions = computed(() => sessions.value.filter(s => s.mode === 'answer'))
+  const targetSchema = ref('')
+  const newSchemaName = ref('')
   const buildBrief = computed(() => modeState.build.buildBrief)
   const buildIntent = computed({
     get: () => buildBrief.value.intent,
@@ -155,6 +164,7 @@ export function useOntologyStudio() {
   })
 
   let neo4jInterval = null
+  let activeEventSource = null
 
   function getModeState(targetMode = mode.value) {
     return modeState[targetMode]
@@ -191,7 +201,25 @@ export function useOntologyStudio() {
   }
 
   function setMode(nextMode) {
-    if (!MODES[nextMode] || nextMode === mode.value || isStreaming.value) {
+    if (!MODES[nextMode] || isStreaming.value) {
+      return
+    }
+    if (nextMode === mode.value) {
+      // Same mode clicked again → start a fresh blank session locally
+      // Persist current messages before clearing
+      const currentState = getModeState(nextMode)
+      if (currentState.messages.length > 0) {
+        persistMessages(nextMode)
+      }
+      // Generate a local pending ID (will be created on first send)
+      const pendingId = `pending_${Date.now()}`
+      sessionId.value = pendingId
+      for (const key of MODE_KEYS) {
+        resetModeState(key)
+      }
+      uploadedFiles.value = []
+      outputFiles.value = []
+      traversedNodeIds.value = []
       return
     }
     mode.value = nextMode
@@ -228,11 +256,17 @@ export function useOntologyStudio() {
   }
 
   function createBuildContext(reviewFeedback = []) {
-    return {
+    const ctx = {
       intent: buildIntent.value.trim(),
       golden_questions: [...normalizedBuildGoldenQuestions.value],
       review_feedback: reviewFeedback,
     }
+    // Include target schema info for the agent
+    const schemaName = targetSchema.value || newSchemaName.value || ''
+    if (schemaName) {
+      ctx.target_schema = schemaName
+    }
+    return ctx
   }
 
   function replaceAssistantText(message, text) {
@@ -284,10 +318,91 @@ export function useOntologyStudio() {
     return incorrectItems.length > 0 && incorrectItems.every((item) => item.feedback)
   }
 
+  function persistMessages(targetMode = mode.value) {
+    if (sessionId.value.startsWith('pending_')) return
+    const state = getModeState(targetMode)
+    // Deep clone to ensure nested objects (steps, args, buildReport) are serialized
+    const serializable = JSON.parse(JSON.stringify(state.messages))
+    fetch(
+      `${API}/api/sessions/${encodeURIComponent(sessionId.value)}/messages?mode=${targetMode}`,
+      {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(serializable),
+      }
+    ).catch(() => {})
+  }
+
+  async function loadSessionMessages(targetSessionId) {
+    for (const m of MODE_KEYS) {
+      try {
+        const res = await fetch(
+          `${API}/api/sessions/${encodeURIComponent(targetSessionId)}/messages?mode=${m}`
+        )
+        const data = await res.json()
+        const state = getModeState(m)
+        if (data.messages?.length) {
+          replaceItems(state.messages, data.messages)
+          // Restore buildBrief from the first user message that has one
+          if (m === 'build' && state.buildBrief) {
+            const briefMsg = data.messages.find((msg) => msg.buildBrief)
+            if (briefMsg) {
+              state.buildBrief.intent = briefMsg.buildBrief.intent || ''
+              replaceItems(
+                state.buildBrief.goldenQuestions,
+                briefMsg.buildBrief.goldenQuestions?.length
+                  ? briefMsg.buildBrief.goldenQuestions
+                  : ['']
+              )
+            }
+          }
+          // Restore traversed node IDs from answer mode tool results
+          if (m === 'answer') {
+            traversedNodeIds.value = extractTraversedNodeIds(data.messages)
+          }
+        }
+      } catch {
+        // ignore
+      }
+    }
+    scrollBottom()
+  }
+
+  function extractTraversedNodeIds(messages) {
+    const ids = []
+    for (const msg of messages) {
+      if (msg.role !== 'assistant') continue
+      for (const step of msg.steps || []) {
+        if (step.type !== 'tool_result') continue
+        try {
+          const items = JSON.parse(step.content)
+          const list = Array.isArray(items) ? items : [items]
+          for (const item of list) {
+            if (!item || typeof item !== 'object') continue
+            // vector_search: node_id field
+            if (item.node_id) ids.push(item.node_id)
+            // entity_search / cypher: id field (element_id format "4:uuid:num")
+            else if (item.id && typeof item.id === 'string' && item.id.includes(':')) ids.push(item.id)
+            // nested node dicts in cypher results
+            for (const val of Object.values(item)) {
+              if (val && typeof val === 'object' && val.id && typeof val.id === 'string' && val.id.includes(':')) {
+                ids.push(val.id)
+              }
+            }
+          }
+        } catch {
+          // not JSON, skip
+        }
+      }
+    }
+    // dedupe preserving order
+    return [...new Set(ids)]
+  }
+
   function buildStreamUrl(prompt, currentMode, buildContext = null) {
     const url = new URL(`${API}/api/stream`)
     url.searchParams.set('prompt', prompt)
-    url.searchParams.set('session_id', SESSION_ID)
+    url.searchParams.set('session_id', sessionId.value)
     url.searchParams.set('mode', currentMode)
     if (buildContext) {
       url.searchParams.set('build_context', JSON.stringify(buildContext))
@@ -328,6 +443,52 @@ export function useOntologyStudio() {
     }
   }
 
+  async function fetchGraphData(className = '', limit = 200) {
+    try {
+      const params = new URLSearchParams()
+      if (className) params.set('class_name', className)
+      if (selectedSchema.value) params.set('schema_name', selectedSchema.value)
+      params.set('limit', String(limit))
+      const res = await fetch(`${API}/api/graph?${params}`)
+      graphData.value = await res.json()
+    } catch {
+      graphData.value = { nodes: [], edges: [] }
+    }
+  }
+
+  async function fetchSchemas() {
+    try {
+      const res = await fetch(`${API}/api/schemas`)
+      const data = await res.json()
+      schemas.value = data.schemas || []
+    } catch {
+      schemas.value = []
+    }
+  }
+
+  async function selectSchema(schemaName) {
+    selectedSchema.value = schemaName || null
+    await fetchGraphData()
+  }
+
+  async function deleteSchemaEntities(schemaId) {
+    try {
+      await fetch(`${API}/api/schemas/${schemaId}/entities`, { method: 'DELETE' })
+      await refreshSchema()
+    } catch {
+      // ignore
+    }
+  }
+
+  async function rebuildSchema(schemaId) {
+    try {
+      await fetch(`${API}/api/schemas/${schemaId}/rebuild`, { method: 'POST' })
+      await refreshSchema()
+    } catch {
+      // ignore
+    }
+  }
+
   async function refreshSchema() {
     try {
       const res = await fetch(`${API}/api/schema`)
@@ -337,6 +498,8 @@ export function useOntologyStudio() {
         relationships: data.relationships || [],
       }
       await refreshEntityCounts()
+      await fetchSchemas()
+      await fetchGraphData()
     } catch {
       // ignore
     }
@@ -368,7 +531,7 @@ export function useOntologyStudio() {
       fd.append('files', file)
       names.push(file.name)
     }
-    fd.append('session_id', SESSION_ID)
+    fd.append('session_id', sessionId.value)
     await fetch(`${API}/api/upload`, { method: 'POST', body: fd })
     await refreshFiles()
     return names
@@ -379,6 +542,7 @@ export function useOntologyStudio() {
       return
     }
 
+    await ensureSessionOnServer()
     const names = await uploadFiles(fileList)
     const shouldNotifyInChat = mode.value !== 'build' || getModeState().messages.length > 0
     if (names.length && shouldNotifyInChat) {
@@ -395,11 +559,55 @@ export function useOntologyStudio() {
     window.open(`${API}/api/download/${encodeURIComponent(name)}`, '_blank')
   }
 
+  async function deleteUploadFile(name) {
+    await fetch(`${API}/api/files/${encodeURIComponent(name)}`, { method: 'DELETE' })
+    await refreshFiles()
+  }
+
+  function autoUpdateSessionTitle(currentMode, prompt) {
+    // Count total user messages across all modes
+    const totalUserMsgs = MODE_KEYS.reduce(
+      (sum, m) => sum + getModeState(m).messages.filter(msg => msg.role === 'user').length,
+      0
+    )
+    // Only set title on the very first user message of the session
+    if (totalUserMsgs === 1 && prompt) {
+      const rawTitle = prompt.length > 30 ? prompt.slice(0, 30) + '...' : prompt
+      const title = rawTitle
+      const params = new URLSearchParams({ title })
+      // Also update schema_name if build mode
+      if (currentMode === 'build') {
+        const schemaName = targetSchema.value || newSchemaName.value || ''
+        if (schemaName) params.set('schema_name', schemaName)
+      }
+      fetch(
+        `${API}/api/sessions/${encodeURIComponent(sessionId.value)}?${params}`,
+        { method: 'PATCH' }
+      ).then(() => fetchSessions()).catch(() => {})
+    }
+  }
+
+  async function ensureSessionOnServer() {
+    if (sessionId.value.startsWith('pending_')) {
+      const currentMode = mode.value
+      const schemaName = currentMode === 'build'
+        ? (targetSchema.value || newSchemaName.value || '')
+        : ''
+      const params = new URLSearchParams({ title: '새 대화', mode: currentMode })
+      if (schemaName) params.set('schema_name', schemaName)
+      const res = await fetch(`${API}/api/sessions?${params}`, { method: 'POST' })
+      const session = await res.json()
+      sessionId.value = session.id
+      await fetchSessions()
+    }
+  }
+
   function startStreamingRequest({ currentMode, prompt, userMessage, buildContext = null }) {
     const state = getModeState(currentMode)
 
     state.messages.push(userMessage)
     state.draft = ''
+    traversedNodeIds.value = []
     scrollBottom()
 
     state.messages.push({ role: 'assistant', steps: [], files: [], mode: currentMode })
@@ -412,6 +620,7 @@ export function useOntologyStudio() {
 
     let currentTokenIdx = -1
     const es = new EventSource(buildStreamUrl(prompt, currentMode, buildContext))
+    activeEventSource = es
 
     es.addEventListener('token', (event) => {
       const data = JSON.parse(event.data)
@@ -428,7 +637,13 @@ export function useOntologyStudio() {
     es.addEventListener('tool_start', (event) => {
       const data = JSON.parse(event.data)
       currentTokenIdx = -1
-      getAiMsg().steps.push({ type: 'tool_start', name: data.name, done: false })
+      getAiMsg().steps.push({
+        type: 'tool_start',
+        name: data.name,
+        args: data.args || {},
+        description: data.description || '',
+        done: false,
+      })
       scrollBottom()
     })
 
@@ -448,6 +663,14 @@ export function useOntologyStudio() {
 
     es.addEventListener('neo4j_update', () => {
       refreshSchema()
+    })
+
+    es.addEventListener('traversed_nodes', (event) => {
+      const data = JSON.parse(event.data)
+      const ids = data.node_ids || []
+      if (ids.length) {
+        traversedNodeIds.value = [...traversedNodeIds.value, ...ids]
+      }
     })
 
     es.addEventListener('preprocess_progress', (event) => {
@@ -512,7 +735,10 @@ export function useOntologyStudio() {
       }
 
       isStreaming.value = false
+      activeEventSource = null
       es.close()
+      persistMessages(currentMode)
+      autoUpdateSessionTitle(currentMode, prompt)
       refreshAll()
       scrollBottom()
     })
@@ -521,12 +747,14 @@ export function useOntologyStudio() {
       const data = JSON.parse(event.data)
       getAiMsg().steps.push({ type: 'token', text: `\n오류: ${data.message}` })
       isStreaming.value = false
+      activeEventSource = null
       es.close()
       scrollBottom()
     })
 
     es.onerror = () => {
       isStreaming.value = false
+      activeEventSource = null
       es.close()
       scrollBottom()
     }
@@ -541,17 +769,29 @@ export function useOntologyStudio() {
       return
     }
 
-    if (currentMode === 'build' && !isBuildBriefReady.value) {
+    // Lazily create session on server if pending
+    await ensureSessionOnServer()
+
+    // If there are already messages, this is a follow-up (e.g. "계속해")
+    const hasExistingMessages = state.messages.length > 0
+    const isFollowUp = currentMode === 'build' && hasExistingMessages
+
+    if (currentMode === 'build' && !isFollowUp && !isBuildBriefReady.value) {
       return
     }
 
-    const prompt = currentMode === 'build' ? rawText || DEFAULT_BUILD_PROMPT : rawText
+    const prompt = isFollowUp
+      ? rawText
+      : currentMode === 'build'
+        ? rawText || DEFAULT_BUILD_PROMPT
+        : rawText
     if (!prompt) {
       return
     }
 
-    const userMessage =
-      currentMode === 'build'
+    const userMessage = isFollowUp
+      ? { role: 'user', text: prompt, mode: currentMode }
+      : currentMode === 'build'
         ? {
             role: 'user',
             text: rawText || '구축 의도와 Golden Question을 기준으로 온톨로지 구축 시작',
@@ -571,8 +811,30 @@ export function useOntologyStudio() {
       currentMode,
       prompt,
       userMessage,
-      buildContext: currentMode === 'build' ? createBuildContext() : null,
+      // Don't send build context for follow-up messages
+      buildContext: currentMode === 'build' && !isFollowUp ? createBuildContext() : null,
     })
+  }
+
+  function stopStreaming() {
+    if (!isStreaming.value || !activeEventSource) {
+      return
+    }
+    activeEventSource.close()
+    activeEventSource = null
+    isStreaming.value = false
+
+    // Mark any running tool as stopped
+    const currentMessages = getModeState(mode.value).messages
+    if (currentMessages.length > 0) {
+      const lastMsg = currentMessages[currentMessages.length - 1]
+      if (lastMsg.role === 'assistant') {
+        lastMsg.steps.push({ type: 'token', text: '\n[중단됨] "계속해"를 입력하면 이어서 진행합니다.' })
+      }
+    }
+
+    persistMessages(mode.value)
+    scrollBottom()
   }
 
   async function submitBuildFeedback(message) {
@@ -595,17 +857,118 @@ export function useOntologyStudio() {
   }
 
   async function resetSession() {
-    await fetch(`${API}/api/session/reset`, { method: 'POST' })
+    await fetch(`${API}/api/session/reset?session_id=${encodeURIComponent(sessionId.value)}`, {
+      method: 'POST',
+    })
     uploadedFiles.value = []
     outputFiles.value = []
+    traversedNodeIds.value = []
     for (const key of MODE_KEYS) {
       resetModeState(key)
     }
     await refreshSchema()
   }
 
-  onMounted(() => {
-    refreshAll()
+  async function fetchSessions() {
+    try {
+      const res = await fetch(`${API}/api/sessions`)
+      const data = await res.json()
+      sessions.value = data.sessions || []
+    } catch {
+      sessions.value = []
+    }
+  }
+
+  async function createNewSession(title = '') {
+    try {
+      const currentMode = mode.value
+      const params = new URLSearchParams({ title: title || '새 대화', mode: currentMode })
+      const res = await fetch(`${API}/api/sessions?${params}`, {
+        method: 'POST',
+      })
+      const session = await res.json()
+      sessionId.value = session.id
+      for (const key of MODE_KEYS) {
+        resetModeState(key)
+      }
+      uploadedFiles.value = []
+      traversedNodeIds.value = []
+      outputFiles.value = []
+      await fetchSessions()
+      await refreshAll()
+      return session
+    } catch {
+      return null
+    }
+  }
+
+  async function switchSession(targetSessionId) {
+    if (targetSessionId === sessionId.value || isStreaming.value) {
+      return
+    }
+    // Save current session messages before switching (skip pending sessions)
+    if (!sessionId.value.startsWith('pending_')) {
+      for (const m of MODE_KEYS) {
+        if (getModeState(m).messages.length > 0) {
+          persistMessages(m)
+        }
+      }
+    }
+    sessionId.value = targetSessionId
+    for (const key of MODE_KEYS) {
+      resetModeState(key)
+    }
+    uploadedFiles.value = []
+    outputFiles.value = []
+    traversedNodeIds.value = []
+    // Switch mode to match the session's mode
+    const session = sessions.value.find(s => s.id === targetSessionId)
+    if (session?.mode && MODES[session.mode]) {
+      mode.value = session.mode
+    }
+    // Auto-select associated schema for build sessions
+    if (session?.schema_name) {
+      selectedSchema.value = session.schema_name
+    } else {
+      selectedSchema.value = null
+    }
+    await loadSessionMessages(targetSessionId)
+    await refreshAll()
+  }
+
+  async function deleteSession(targetSessionId) {
+    try {
+      await fetch(`${API}/api/sessions/${encodeURIComponent(targetSessionId)}`, {
+        method: 'DELETE',
+      })
+      if (targetSessionId === sessionId.value) {
+        sessionId.value = 'default'
+        for (const key of MODE_KEYS) {
+          resetModeState(key)
+        }
+        uploadedFiles.value = []
+        outputFiles.value = []
+        await refreshAll()
+      }
+      await fetchSessions()
+    } catch {
+      // ignore
+    }
+  }
+
+  async function clearNeo4jAll() {
+    const res = await fetch(`${API}/api/neo4j/clear-all`, { method: 'POST' })
+    const data = await res.json()
+    if (data.status === 'ok') {
+      await refreshSchema()
+    }
+    return data
+  }
+
+  onMounted(async () => {
+    await fetchSessions()
+    await loadSessionMessages(sessionId.value)
+    await refreshAll()
     neo4jInterval = setInterval(checkNeo4jStatus, 30000)
   })
 
@@ -616,18 +979,28 @@ export function useOntologyStudio() {
   })
 
   return {
+    apiBase: API,
     addBuildGoldenQuestion,
     importBuildGoldenQuestions,
     buildGoldenQuestions,
     buildIntent,
+    buildSessions,
+    answerSessions,
     canSend,
     canSubmitBuildFeedback,
+    clearNeo4jAll,
+    createNewSession,
     currentModeMeta,
+    deleteSession,
+    deleteUploadFile,
     doUploadAndNotify,
     downloadFile,
     effectiveInputPlaceholder,
     entityCounts,
     examples,
+    fetchGraphData,
+    fetchSessions,
+    graphData,
     inputText,
     isBuildBriefReady,
     isNeo4jTool,
@@ -643,13 +1016,25 @@ export function useOntologyStudio() {
     removeBuildGoldenQuestion,
     resetSession,
     schema,
+    schemas,
+    selectedSchema,
+    selectSchema,
+    deleteSchemaEntities,
+    rebuildSchema,
     send,
+    sessionId,
+    sessions,
     setBuildGoldenQuestion,
     setMode,
     showFilePanel,
     skills,
+    stopStreaming,
     submitBuildFeedback,
+    switchSession,
+    targetSchema,
+    newSchemaName,
     todos,
+    traversedNodeIds,
     uploadedFiles,
   }
 }

@@ -19,6 +19,7 @@ dependencies = [
     "pyyaml",
     "python-dotenv",
     "python-multipart",
+    "tiktoken",
     "uvicorn",
 ]
 

@@ -89,6 +89,14 @@
                     <span v-if="!tool.done" class="tool-running">실행 중...</span>
                     <span v-else class="tool-done-icon">&#10003;</span>
                   </div>
+                  <div v-if="tool.description" class="tool-description">
+                    {{ tool.description }}
+                  </div>
+                  <details v-if="hasToolArgs(tool)" class="tool-args-detail">
+                    <summary>입력 보기</summary>
+                    <pre v-if="tool.name === 'execute' && tool.args?.command" class="tool-code">{{ tool.args.command }}</pre>
+                    <pre v-else>{{ JSON.stringify(tool.args, null, 2) }}</pre>
+                  </details>
                   <details v-if="tool.result" class="tool-result-detail">
                     <summary>결과 보기</summary>
                     <pre>{{ tool.result }}</pre>
@@ -164,6 +172,15 @@
           @keydown.enter.exact="onEnter"
         />
         <button
+          v-if="isStreaming"
+          class="btn-stop"
+          title="중단"
+          @click="$emit('stop')"
+        >
+          &#9724;
+        </button>
+        <button
+          v-else
           class="btn-send"
           :disabled="!canSend"
           @click="$emit('send')"
@@ -226,7 +243,7 @@ const props = defineProps({
   },
 })
 
-const emit = defineEmits(['download', 'send', 'send-example', 'submit-build-feedback'])
+const emit = defineEmits(['download', 'send', 'send-example', 'stop', 'submit-build-feedback'])
 
 function setBuildVerdict(message, index, verdict) {
   const item = message?.buildReport?.goldenQuestions?.[index]
@@ -251,7 +268,7 @@ function getToolGroups(msg) {
   const groups = []
   for (const step of msg.steps) {
     if (step.type === 'tool_start') {
-      groups.push({ name: step.name, done: step.done, result: null })
+      groups.push({ name: step.name, args: step.args || null, description: step.description || '', done: step.done, result: null })
     } else if (step.type === 'tool_result') {
       for (let i = groups.length - 1; i >= 0; i--) {
         if (groups[i].name === step.name && !groups[i].result) {
@@ -262,6 +279,29 @@ function getToolGroups(msg) {
     }
   }
   return groups
+}
+
+function hasToolArgs(tool) {
+  return tool.args && Object.keys(tool.args).length > 0
+}
+
+function formatToolArgsSummary(tool) {
+  if (!tool.args || Object.keys(tool.args).length === 0) return ''
+  if (tool.name === 'execute') {
+    const cmd = tool.args.command || ''
+    const firstLine = cmd.split('\n')[0].substring(0, 60)
+    return firstLine + (cmd.length > 60 ? '...' : '')
+  }
+  if (tool.name === 'sandbox_ls') return tool.args.path || ''
+  if (tool.name === 'sandbox_read') return tool.args.file_path || ''
+  if (tool.name === 'batch_ingest') return tool.args.nodes_json?.substring(0, 50) || ''
+  if (tool.name === 'schema_create_class') return tool.args.name || ''
+  if (tool.name === 'schema_create_relationship_type') return tool.args.name || ''
+  if (tool.name === 'entity_search') return `${tool.args.class_name || ''}`
+  if (tool.name === 'neo4j_cypher' || tool.name === 'neo4j_cypher_readonly') {
+    return (tool.args.query || '').substring(0, 60)
+  }
+  return ''
 }
 
 function getTextContent(msg) {

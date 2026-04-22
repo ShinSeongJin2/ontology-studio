@@ -692,6 +692,7 @@ dependencies = [
     { name = "python-dotenv" },
     { name = "python-multipart" },
     { name = "pyyaml" },
+    { name = "tiktoken" },
     { name = "uvicorn" },
 ]
 
@@ -708,6 +709,7 @@ requires-dist = [
     { name = "python-dotenv" },
     { name = "python-multipart" },
     { name = "pyyaml" },
+    { name = "tiktoken" },
     { name = "uvicorn" },
 ]
 

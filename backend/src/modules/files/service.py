@@ -217,6 +217,26 @@ def copy_output_file(filename: str) -> str | None:
     return None
 
 
+def delete_upload_file(filename: str) -> bool:
+    """Delete a single uploaded file from local cache and sandbox."""
+
+    settings = get_settings()
+    norm = unicodedata.normalize("NFC", filename)
+    local = _LOCAL_UPLOAD_ROOT / norm
+    deleted = False
+    if local.exists():
+        local.unlink(missing_ok=True)
+        deleted = True
+    subprocess.run(
+        [
+            "docker", "exec", settings.container_name,
+            "rm", "-f", f"/workspace/uploads/{norm}",
+        ],
+        capture_output=True,
+    )
+    return deleted
+
+
 def clear_workspace_files() -> None:
     """Remove uploaded and generated files from the sandbox workspace."""
 

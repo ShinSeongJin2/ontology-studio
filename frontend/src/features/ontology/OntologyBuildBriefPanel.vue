@@ -11,6 +11,50 @@
         </div>
 
         <div class="build-brief-form">
+          <div class="build-brief-field">
+            <span>파일</span>
+            <div
+              class="build-upload-zone"
+              :class="{ 'drag-active': dragOver }"
+              @dragover.prevent="dragOver = true"
+              @dragleave="dragOver = false"
+              @drop.prevent="handleDrop"
+              @click="docFileInput?.click()"
+            >
+              <input ref="docFileInput" type="file" hidden multiple @change="handleDocSelect" />
+              <div v-if="!uploadedFiles.length" class="build-upload-placeholder">
+                + 파일 업로드 (드래그 앤 드롭 가능)
+              </div>
+              <div v-else class="build-upload-file-list">
+                <span v-for="f in uploadedFiles" :key="f.name" class="build-upload-chip">
+                  {{ f.name }} <span class="build-upload-size">{{ f.size }}</span>
+                </span>
+                <span class="build-upload-add">+ 추가</span>
+              </div>
+            </div>
+          </div>
+
+          <div v-if="schemas.length" class="build-brief-field">
+            <span>대상 스키마</span>
+            <select
+              :value="targetSchema"
+              class="build-brief-select"
+              :disabled="isStreaming"
+              @change="$emit('update:targetSchema', $event.target.value)"
+            >
+              <option value="">새 스키마 생성</option>
+              <option v-for="s in schemas" :key="s.id" :value="s.name">{{ s.name }} (추가 인제스천)</option>
+            </select>
+            <input
+              v-if="!targetSchema"
+              :value="newSchemaName"
+              class="build-brief-input"
+              :disabled="isStreaming"
+              placeholder="새 스키마 이름 (예: 보험약관 스키마)"
+              @input="$emit('update:newSchemaName', $event.target.value)"
+            />
+          </div>
+
           <label class="build-brief-field">
             <span>구축 의도</span>
             <textarea
@@ -106,6 +150,22 @@ defineProps({
     type: Boolean,
     required: true,
   },
+  uploadedFiles: {
+    type: Array,
+    default: () => [],
+  },
+  schemas: {
+    type: Array,
+    default: () => [],
+  },
+  targetSchema: {
+    type: String,
+    default: '',
+  },
+  newSchemaName: {
+    type: String,
+    default: '',
+  },
 })
 
 const emit = defineEmits([
@@ -115,9 +175,33 @@ const emit = defineEmits([
   'start-build',
   'update:intent',
   'update:question',
+  'update:targetSchema',
+  'update:newSchemaName',
+  'upload',
 ])
 
 const fileInputRef = ref(null)
+const docFileInput = ref(null)
+const dragOver = ref(false)
+
+function handleDocSelect(event) {
+  const files = event.target.files
+  if (files?.length) {
+    // Copy files before clearing input — FileList is a live reference
+    const copied = Array.from(files)
+    event.target.value = ''
+    emit('upload', copied)
+  } else {
+    event.target.value = ''
+  }
+}
+
+function handleDrop(event) {
+  dragOver.value = false
+  if (event.dataTransfer.files?.length) {
+    emit('upload', event.dataTransfer.files)
+  }
+}
 
 function triggerFileUpload() {
   fileInputRef.value?.click()
