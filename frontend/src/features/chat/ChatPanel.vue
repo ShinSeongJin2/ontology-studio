@@ -162,14 +162,44 @@
       </div>
     </div>
 
-    <div class="chat-input-bar">
+    <div
+      class="chat-input-bar"
+      :class="{ 'drag-active': inputDragOver }"
+      @dragover.prevent="inputDragOver = true"
+      @dragleave="inputDragOver = false"
+      @drop.prevent="onInputDrop"
+    >
+      <div v-if="pendingFiles.length" class="input-pending-files">
+        <span v-for="(f, i) in pendingFiles" :key="i" class="input-file-chip">
+          {{ f.name }}
+          <button class="input-file-remove" @click="pendingFiles.splice(i, 1)">&times;</button>
+        </span>
+      </div>
       <div class="input-wrapper">
+        <button
+          class="btn-attach"
+          title="파일 첨부"
+          :disabled="isStreaming"
+          @click="$refs.chatFileInput.click()"
+        >
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/>
+          </svg>
+        </button>
+        <input
+          ref="chatFileInput"
+          type="file"
+          multiple
+          hidden
+          @change="onFileSelect"
+        />
         <textarea
           v-model="inputText"
           rows="1"
           :placeholder="inputPlaceholder"
           :disabled="isStreaming"
           @keydown.enter.exact="onEnter"
+          @paste="onPaste"
         />
         <button
           v-if="isStreaming"
@@ -182,8 +212,8 @@
         <button
           v-else
           class="btn-send"
-          :disabled="!canSend"
-          @click="$emit('send')"
+          :disabled="!canSend && !pendingFiles.length"
+          @click="onSendWithFiles"
         >
           &#10148;
         </button>
@@ -193,7 +223,7 @@
 </template>
 
 <script setup>
-import { reactive } from 'vue'
+import { reactive, ref } from 'vue'
 import GoldenQuestionReviewPanel from '../ontology/GoldenQuestionReviewPanel.vue'
 import MarkdownContent from '../../shared/ui/MarkdownContent.vue'
 
@@ -203,6 +233,9 @@ const inputText = defineModel('inputText', {
 })
 
 const toolPanelOverrides = reactive(new Map())
+const pendingFiles = ref([])
+const inputDragOver = ref(false)
+const chatFileInput = ref(null)
 
 const props = defineProps({
   examples: {
@@ -243,7 +276,7 @@ const props = defineProps({
   },
 })
 
-const emit = defineEmits(['download', 'send', 'send-example', 'stop', 'submit-build-feedback'])
+const emit = defineEmits(['download', 'send', 'send-example', 'stop', 'submit-build-feedback', 'upload'])
 
 function setBuildVerdict(message, index, verdict) {
   const item = message?.buildReport?.goldenQuestions?.[index]
@@ -377,9 +410,45 @@ function getToolSummaryLabel(msg) {
 function onEnter(event) {
   if (!event.shiftKey) {
     event.preventDefault()
-    if (props.canSend) {
-      emit('send')
+    onSendWithFiles()
+  }
+}
+
+function onFileSelect(event) {
+  const files = event.target.files
+  if (files?.length) {
+    for (const f of files) pendingFiles.value.push(f)
+  }
+  event.target.value = ''
+}
+
+function onInputDrop(event) {
+  inputDragOver.value = false
+  const files = event.dataTransfer?.files
+  if (files?.length) {
+    for (const f of files) pendingFiles.value.push(f)
+  }
+}
+
+function onPaste(event) {
+  const items = event.clipboardData?.items
+  if (!items) return
+  for (const item of items) {
+    if (item.kind === 'file') {
+      const file = item.getAsFile()
+      if (file) pendingFiles.value.push(file)
     }
+  }
+}
+
+async function onSendWithFiles() {
+  // Upload pending files first
+  if (pendingFiles.value.length) {
+    emit('upload', Array.from(pendingFiles.value))
+    pendingFiles.value = []
+  }
+  if (props.canSend || inputText.value.trim()) {
+    emit('send')
   }
 }
 </script>
@@ -421,5 +490,59 @@ function onEnter(event) {
 .preprocess-summary-item {
   font-size: 13px;
   opacity: 0.88;
+}
+
+/* --- Chat input file attachment --- */
+.chat-input-bar.drag-active {
+  outline: 2px dashed #018bff;
+  outline-offset: -2px;
+  background: rgba(1, 139, 255, 0.05);
+}
+.input-pending-files {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 6px 12px 0;
+}
+.input-file-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: rgba(1, 139, 255, 0.15);
+  color: #60a5fa;
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 4px;
+}
+.input-file-remove {
+  background: none;
+  border: none;
+  color: #60a5fa;
+  cursor: pointer;
+  font-size: 13px;
+  padding: 0 2px;
+  line-height: 1;
+}
+.input-file-remove:hover {
+  color: #f85149;
+}
+.btn-attach {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 4px;
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+.btn-attach:hover:not(:disabled) {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.06);
+}
+.btn-attach:disabled {
+  opacity: 0.3;
+  cursor: default;
 }
 </style>

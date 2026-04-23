@@ -91,7 +91,7 @@
         @start-build="send"
         @update:intent="buildIntent = $event"
         @update:question="setBuildGoldenQuestion"
-        @update:targetSchema="targetSchema = $event"
+        @update:targetSchema="selectTargetSchema($event)"
         @update:newSchemaName="newSchemaName = $event"
         @upload="doUploadAndNotify"
       />
@@ -112,6 +112,7 @@
         @send="send"
         @send-example="send"
         @stop="stopStreaming"
+        @upload="doUploadAndNotify"
         @submit-build-feedback="submitBuildFeedback"
       />
     </main>
@@ -149,6 +150,11 @@
           @filter="handleGraphFilter"
           @schema-filter="handleSchemaFilter"
           @refresh="fetchGraphData"
+          @save-class="saveClass"
+          @delete-class="deleteClass"
+          @save-relationship="saveRelationship"
+          @delete-schema-entities="handleDeleteSchemaEntities"
+          @delete-schema="handleDeleteSchemaFull"
         />
       </div>
       <div v-else class="right-panel-scroll">
@@ -167,6 +173,10 @@
           @select-schema="handleSchemaFilter"
           @delete-schema-entities="handleDeleteSchemaEntities"
           @rebuild-schema="handleRebuildSchema"
+          @save-class="saveClass"
+          @delete-class="deleteClass"
+          @save-relationship="saveRelationship"
+          @delete-relationship="({ name, from_class, to_class }) => deleteRelationship(name, from_class, to_class)"
         />
         <ContextPanel
           :open="panelOpen.context"
@@ -204,6 +214,8 @@ const {
   clearNeo4jAll,
   createNewSession,
   currentModeMeta,
+  deleteClass,
+  deleteRelationship,
   deleteSession,
   deleteUploadFile,
   doUploadAndNotify,
@@ -233,6 +245,9 @@ const {
   selectSchema,
   deleteSchemaEntities,
   rebuildSchema,
+  saveClass,
+  saveRelationship,
+  selectTargetSchema,
   send,
   sessionId,
   sessions,
@@ -251,8 +266,8 @@ const {
 } = useOntologyStudio()
 
 const rightTab = ref('graph')
-const rightPanelWidth = ref(380)
-const DEFAULT_PANEL_WIDTH = 380
+const rightPanelWidth = ref(680)
+const DEFAULT_PANEL_WIDTH = 680
 const MIN_PANEL_WIDTH = 280
 const MAX_PANEL_WIDTH = 900
 const EXPANDED_RATIO = 0.55
@@ -318,6 +333,12 @@ function handleDeleteSchemaEntities(schemaId) {
 
 function handleRebuildSchema(schemaId) {
   rebuildSchema(schemaId)
+}
+
+async function handleDeleteSchemaFull(schemaId) {
+  await deleteSchemaEntities(schemaId)
+  await fetch(`${apiBase}/api/schemas/${encodeURIComponent(schemaId)}`, { method: 'DELETE' })
+  await refreshAll()
 }
 
 function formatSessionDate(timestamp) {

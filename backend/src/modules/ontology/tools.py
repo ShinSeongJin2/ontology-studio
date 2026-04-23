@@ -134,7 +134,7 @@ def schema_create_class(
     properties: str = "[]",
     schema_name: str = "",
 ) -> str:
-    """Create or update an ontology class. If schema_name is provided, also registers the class in that SQLite schema group."""
+    """Create or update an ontology class in SQLite (source of truth). schema_name is required."""
 
     from ..agent_session.session_store import (
         add_class_to_schema,
@@ -144,29 +144,9 @@ def schema_create_class(
 
     try:
         props = json.loads(properties) if properties else []
-        rows = _run_query(
-            """
-            MERGE (c:_OntologyClass {name: $name})
-            SET c.description = $description,
-                c.properties = $properties,
-                c.updated_at = datetime()
-            RETURN c
-            """,
-            {
-                "name": name,
-                "description": description,
-                "properties": json.dumps(props, ensure_ascii=False),
-            },
-        )
+        result: dict[str, Any] = {"status": "ok", "class": {"name": name, "description": description}}
 
-        result: dict[str, Any] = {"status": "ok"}
-        if rows:
-            node = rows[0]["c"]
-            result["class"] = _node_to_dict(node)
-        else:
-            result["class"] = name
-
-        # Register in SQLite schema group if schema_name provided
+        # SQLite is the source of truth for schema definitions
         if schema_name:
             schema = get_schema_by_name(schema_name)
             if schema:
@@ -183,6 +163,8 @@ def schema_create_class(
                     schema["id"], name, description,
                     json.dumps(props, ensure_ascii=False),
                 )
+            else:
+                result["warning"] = f"스키마 '{schema_name}'을(를) 찾을 수 없습니다."
 
         return json.dumps(result, ensure_ascii=False, default=str)
     except Exception as exc:  # pragma: no cover - passthrough error handling
@@ -197,7 +179,7 @@ def schema_create_relationship_type(
     properties: str = "[]",
     schema_name: str = "",
 ) -> str:
-    """Define an ontology relationship type. If schema_name is provided, also registers in SQLite schema group."""
+    """Define an ontology relationship type in SQLite (source of truth)."""
 
     from ..agent_session.session_store import (
         add_relationship_to_schema,
@@ -206,142 +188,107 @@ def schema_create_relationship_type(
 
     try:
         props = json.loads(properties) if properties else []
-        rows = _run_query(
-            """
-            MATCH (from_c:_OntologyClass {name: $from_class})
-            MATCH (to_c:_OntologyClass {name: $to_class})
-            MERGE (r:_OntologyRelationshipType {name: $name})
-            SET r.description = $description,
-                r.from_class = $from_class,
-                r.to_class = $to_class,
-                r.properties = $properties,
-                r.updated_at = datetime()
-            MERGE (r)-[:FROM_CLASS]->(from_c)
-            MERGE (r)-[:TO_CLASS]->(to_c)
-            RETURN r
-            """,
-            {
-                "name": name,
-                "from_class": from_class,
-                "to_class": to_class,
-                "description": description,
-                "properties": json.dumps(props, ensure_ascii=False),
-            },
-        )
-        if rows:
-            node = rows[0]["r"]
-            # Register in SQLite schema group
-            if schema_name:
-                schema = get_schema_by_name(schema_name)
-                if schema:
-                    add_relationship_to_schema(
-                        schema["id"], name, from_class, to_class,
-                        description, json.dumps(props, ensure_ascii=False),
-                    )
-            return json.dumps(
-                {"status": "ok", "relationship_type": _node_to_dict(node)},
-                ensure_ascii=False,
-                default=str,
-            )
-        return json.dumps(
-            {
-                "error": (
-                    f"클래스 '{from_class}' 또는 '{to_class}'를 찾을 수 없습니다. "
-                    "먼저 schema_create_class로 클래스를 생성하세요."
+        result: dict[str, Any] = {
+            "status": "ok",
+            "relationship_type": {"name": name, "from_class": from_class, "to_class": to_class},
+        }
+
+        # SQLite is the source of truth
+        if schema_name:
+            schema = get_schema_by_name(schema_name)
+            if schema:
+                add_relationship_to_schema(
+                    schema["id"], name, from_class, to_class,
+                    description, json.dumps(props, ensure_ascii=False),
                 )
-            },
-            ensure_ascii=False,
-        )
+            else:
+                result["warning"] = f"스키마 '{schema_name}'을(를) 찾을 수 없습니다."
+
+        return json.dumps(result, ensure_ascii=False, default=str)
     except Exception as exc:  # pragma: no cover - passthrough error handling
         return json.dumps({"error": str(exc)}, ensure_ascii=False)
 
 
-def schema_get() -> str:
-    """Return the full ontology schema."""
+def schema_delete_class(name: str) -> str:
+    """Delete an ontology class from SQLite and its entity instances from Neo4j."""
+
+    from ..agent_session.session_store import remove_class_from_all_schemas
 
     try:
-        classes = _run_readonly_query(
-            """
-            MATCH (c)
-            WHERE $class_label IN labels(c)
-            RETURN c
-            """,
-            {"class_label": "_OntologyClass"},
+        # Delete entity instances from Neo4j
+        count_rows = _run_readonly_query(
+            f"MATCH (n:_Entity:{name}) RETURN count(n) AS cnt",
+            {},
         )
-        relationships = _run_readonly_query(
-            """
-            MATCH (r)
-            WHERE $relationship_label IN labels(r)
-            OPTIONAL MATCH (r)-[from_rel]->(fc)
-            WHERE type(from_rel) = $from_rel_type
-            OPTIONAL MATCH (r)-[to_rel]->(tc)
-            WHERE type(to_rel) = $to_rel_type
-            RETURN r, fc, tc
-            """,
-            {
-                "relationship_label": "_OntologyRelationshipType",
-                "from_rel_type": "FROM_CLASS",
-                "to_rel_type": "TO_CLASS",
-            },
+        entity_count = count_rows[0]["cnt"] if count_rows else 0
+        if entity_count > 0:
+            _run_query(f"MATCH (n:_Entity:{name}) DETACH DELETE n", {})
+
+        # Remove from SQLite (source of truth)
+        remove_class_from_all_schemas(name)
+        return json.dumps(
+            {"status": "ok", "deleted": name, "entities_deleted": entity_count},
+            ensure_ascii=False,
         )
+    except Exception as exc:
+        return json.dumps({"error": str(exc)}, ensure_ascii=False)
 
-        schema_classes = []
-        for row in classes:
-            node = row["c"]
-            node_dict = _node_to_dict(node) if hasattr(node, "element_id") else node
-            raw_props = node_dict.get("properties", "[]")
-            try:
-                props = json.loads(raw_props) if isinstance(raw_props, str) else raw_props
-            except (json.JSONDecodeError, TypeError):
-                props = []
-            schema_classes.append(
-                {
-                    "name": node_dict.get("name", ""),
-                    "description": node_dict.get("description", ""),
-                    "properties": props,
-                }
-            )
-        schema_classes.sort(key=lambda item: item["name"])
 
-        schema_relationships = []
-        for row in relationships:
-            node = row["r"]
-            node_dict = _node_to_dict(node) if hasattr(node, "element_id") else node
-            from_node = row.get("fc")
-            from_node_dict = (
-                _node_to_dict(from_node) if hasattr(from_node, "element_id") else from_node or {}
-            )
-            to_node = row.get("tc")
-            to_node_dict = (
-                _node_to_dict(to_node) if hasattr(to_node, "element_id") else to_node or {}
-            )
-            raw_props = node_dict.get("properties", "[]")
-            try:
-                props = json.loads(raw_props) if isinstance(raw_props, str) else raw_props
-            except (json.JSONDecodeError, TypeError):
-                props = []
-            schema_relationships.append(
-                {
-                    "name": node_dict.get("name", ""),
-                    "from_class": from_node_dict.get("name") or node_dict.get("from_class", ""),
-                    "to_class": to_node_dict.get("name") or node_dict.get("to_class", ""),
-                    "description": node_dict.get("description", ""),
-                    "properties": props,
-                }
-            )
-        schema_relationships.sort(key=lambda item: item["name"])
+def schema_delete_relationship_type(
+    name: str, from_class: str, to_class: str,
+) -> str:
+    """Delete an ontology relationship type from SQLite."""
 
-        # Add SQLite schema group info
-        from ..agent_session.session_store import list_schemas as _list_schemas
-        try:
-            sqlite_schemas = _list_schemas()
-        except Exception:
-            sqlite_schemas = []
+    from ..agent_session.session_store import remove_relationship_from_all_schemas
+
+    try:
+        remove_relationship_from_all_schemas(name, from_class, to_class)
+        return json.dumps({"status": "ok", "deleted": name}, ensure_ascii=False)
+    except Exception as exc:
+        return json.dumps({"error": str(exc)}, ensure_ascii=False)
+
+
+def schema_get() -> str:
+    """Return the full ontology schema from SQLite (source of truth)."""
+
+    from ..agent_session.session_store import list_schemas as _list_schemas
+
+    try:
+        sqlite_schemas = _list_schemas()
+
+        # Aggregate all unique classes and relationships across all schemas
+        seen_classes: dict[str, dict] = {}
+        seen_rels: set[tuple] = set()
+        all_relationships: list[dict] = []
+
+        for schema in sqlite_schemas:
+            for cls in schema.get("classes", []):
+                name = cls["class_name"]
+                if name not in seen_classes:
+                    seen_classes[name] = {
+                        "name": name,
+                        "description": cls.get("description", ""),
+                        "properties": cls.get("properties", []),
+                    }
+            for rel in schema.get("relationships", []):
+                key = (rel["name"], rel["from_class"], rel["to_class"])
+                if key not in seen_rels:
+                    seen_rels.add(key)
+                    all_relationships.append({
+                        "name": rel["name"],
+                        "from_class": rel["from_class"],
+                        "to_class": rel["to_class"],
+                        "description": rel.get("description", ""),
+                        "properties": rel.get("properties", []),
+                    })
+
+        schema_classes = sorted(seen_classes.values(), key=lambda c: c["name"])
+        all_relationships.sort(key=lambda r: r["name"])
 
         return json.dumps(
             {
                 "classes": schema_classes,
-                "relationships": schema_relationships,
+                "relationships": all_relationships,
                 "schemas": [
                     {"name": s["name"], "description": s["description"],
                      "class_names": [c["class_name"] for c in s.get("classes", [])]}
