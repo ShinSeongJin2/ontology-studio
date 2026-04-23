@@ -3,13 +3,28 @@ FROM python:3.12-slim
 # uv 설치 (Python 패키지 관리를 uv로 통일)
 COPY --from=ghcr.io/astral-sh/uv:0.7.0 /uv /uvx /bin/
 
-# LibreOffice 설치 (xlsx 스킬의 recalc.py에서 사용)
+# LibreOffice 및 PDF OCR 기본 런타임 설치
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends libreoffice-calc && \
+    apt-get install -y --no-install-recommends \
+        ghostscript \
+        libreoffice-calc \
+        ocrmypdf \
+        qpdf \
+        tesseract-ocr \
+        tesseract-ocr-eng \
+        tesseract-ocr-kor && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # 샌드박스 Python 패키지 설치
-RUN uv pip install --system --no-cache openpyxl pandas pdfplumber python-docx
+RUN uv pip install --system --no-cache \
+    openpyxl \
+    pandas \
+    pdfplumber \
+    pypdf \
+    pymupdf \
+    pillow \
+    pytesseract \
+    python-docx
 
 # 작업 디렉토리 설정
 WORKDIR /workspace
