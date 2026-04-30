@@ -54,7 +54,7 @@ def get_settings() -> Settings:
     return Settings(
         container_name=os.environ.get("CONTAINER_NAME", "deepagents-sandbox"),
         sandbox_workdir=os.environ.get("SANDBOX_WORKDIR", "/workspace"),
-        major_model=os.environ.get("MAJOR_MODEL", "openai:gpt-5.4-2026-03-05"),
+        major_model=os.environ.get("MAJOR_MODEL", "openai:gpt-5.5-2026-04-23"),
         major_model_reasoning_effort=os.environ.get(
             "MAJOR_MODEL_REASONING_EFFORT",
             "medium",
