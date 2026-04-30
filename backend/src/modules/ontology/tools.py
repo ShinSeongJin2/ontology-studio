@@ -465,9 +465,11 @@ def batch_ingest(nodes_json: str, schema_name: str = "") -> str:
                 # File is inside the sandbox container — read via docker exec
                 import subprocess
                 from ...shared.kernel.settings import get_settings
+                from ..agent_session.sandbox_tools import map_workspace_path
                 settings = get_settings()
+                mapped_path = map_workspace_path(data_str)
                 result = subprocess.run(
-                    ["docker", "exec", settings.container_name, "cat", data_str],
+                    ["docker", "exec", settings.container_name, "cat", mapped_path],
                     capture_output=True, timeout=30,
                 )
                 if result.returncode != 0:

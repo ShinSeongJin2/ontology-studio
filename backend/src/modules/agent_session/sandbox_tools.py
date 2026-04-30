@@ -2,12 +2,20 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 import json
+import threading
 
+from ..files.service import (
+    ensure_workspace_dirs,
+    normalize_session_id,
+    resolve_sandbox_workspace_path,
+)
 from ...shared.kernel.settings import get_settings
 from ...shared.sandbox.docker_backend import DockerSandboxBackend
 
 _backend = None
+_session_context = threading.local()
 _OCR_SANITY_CHECK_COMMAND = r"""python - <<'PY'
 import importlib.util
 import json
@@ -76,6 +84,50 @@ def _get_backend() -> DockerSandboxBackend:
     return _backend
 
 
+def get_current_session_id() -> str:
+    """Return the session id bound to the current agent worker thread."""
+
+    return getattr(_session_context, "session_id", "default")
+
+
+@contextmanager
+def sandbox_session_context(session_id: str):
+    """Bind sandbox file tools to one session while an agent run is active."""
+
+    previous = getattr(_session_context, "session_id", None)
+    _session_context.session_id = normalize_session_id(session_id)
+    try:
+        yield
+    finally:
+        if previous is None:
+            try:
+                delattr(_session_context, "session_id")
+            except AttributeError:
+                pass
+        else:
+            _session_context.session_id = previous
+
+
+def map_workspace_path(path: str) -> str:
+    """Map public /workspace upload/output paths to the current session root."""
+
+    return resolve_sandbox_workspace_path(path, get_current_session_id())
+
+
+def map_workspace_command(command: str) -> str:
+    """Rewrite common workspace paths inside an agent shell command."""
+
+    session_id = get_current_session_id()
+    mapped = command.replace(
+        "/workspace/uploads",
+        resolve_sandbox_workspace_path("/workspace/uploads", session_id),
+    )
+    return mapped.replace(
+        "/workspace/output",
+        resolve_sandbox_workspace_path("/workspace/output", session_id),
+    )
+
+
 def ensure_sandbox_ready() -> None:
     """Fail fast when the sandbox container is unavailable during startup."""
 
@@ -111,7 +163,8 @@ def execute(command: str) -> str:
     """Execute a shell command (Python or bash) in the sandbox container. Use this for file exploration, running parser scripts, and any code execution."""
 
     try:
-        result = _get_backend().execute(command, timeout=120)
+        ensure_workspace_dirs(get_current_session_id())
+        result = _get_backend().execute(map_workspace_command(command), timeout=120)
         output = result.output or ""
         if result.exit_code != 0:
             return json.dumps({
@@ -130,7 +183,8 @@ def sandbox_ls(path: str = "/workspace/uploads") -> str:
     """List files in the sandbox directory."""
 
     try:
-        result = _get_backend().ls(path)
+        ensure_workspace_dirs(get_current_session_id())
+        result = _get_backend().ls(map_workspace_path(path))
         files = []
         for entry in result.entries:
             files.append({
@@ -146,7 +200,8 @@ def sandbox_read(file_path: str, offset: int = 0, limit: int = 200) -> str:
     """Read file contents from the sandbox."""
 
     try:
-        result = _get_backend().read(file_path, offset=offset, limit=limit)
+        ensure_workspace_dirs(get_current_session_id())
+        result = _get_backend().read(map_workspace_path(file_path), offset=offset, limit=limit)
         content = result.file_data or ""
         if len(content) > 3000:
             content = content[:3000] + "\n... [truncated]"
@@ -159,7 +214,9 @@ def sandbox_write(file_path: str, content: str) -> str:
     """Write file contents to the sandbox."""
 
     try:
-        _get_backend().write(file_path, content)
+        ensure_workspace_dirs(get_current_session_id())
+        mapped_path = map_workspace_path(file_path)
+        _get_backend().write(mapped_path, content)
         return json.dumps({"status": "ok", "path": file_path}, ensure_ascii=False)
     except Exception as exc:
         return json.dumps({"error": str(exc)}, ensure_ascii=False)

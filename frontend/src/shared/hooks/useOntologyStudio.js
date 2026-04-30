@@ -505,10 +505,19 @@ export function useOntologyStudio() {
     }
   }
 
-  async function refreshFiles() {
+  function fileSessionQuery(targetSessionId = sessionId.value) {
+    const params = new URLSearchParams()
+    params.set('session_id', targetSessionId)
+    return params.toString()
+  }
+
+  async function refreshFiles(targetSessionId = sessionId.value) {
     try {
-      const res = await fetch(`${API}/api/files`)
+      const res = await fetch(`${API}/api/files?${fileSessionQuery(targetSessionId)}`)
       const data = await res.json()
+      if (targetSessionId !== sessionId.value) {
+        return
+      }
       uploadedFiles.value = data.uploads || []
       outputFiles.value = data.output || []
     } catch {
@@ -531,9 +540,10 @@ export function useOntologyStudio() {
       fd.append('files', file)
       names.push(file.name)
     }
-    fd.append('session_id', sessionId.value)
+    const targetSessionId = sessionId.value
+    fd.append('session_id', targetSessionId)
     await fetch(`${API}/api/upload`, { method: 'POST', body: fd })
-    await refreshFiles()
+    await refreshFiles(targetSessionId)
     return names
   }
 
@@ -556,12 +566,19 @@ export function useOntologyStudio() {
   }
 
   function downloadFile(name) {
-    window.open(`${API}/api/download/${encodeURIComponent(name)}`, '_blank')
+    window.open(
+      `${API}/api/download/${encodeURIComponent(name)}?${fileSessionQuery()}`,
+      '_blank'
+    )
   }
 
   async function deleteUploadFile(name) {
-    await fetch(`${API}/api/files/${encodeURIComponent(name)}`, { method: 'DELETE' })
-    await refreshFiles()
+    const targetSessionId = sessionId.value
+    await fetch(
+      `${API}/api/files/${encodeURIComponent(name)}?${fileSessionQuery(targetSessionId)}`,
+      { method: 'DELETE' }
+    )
+    await refreshFiles(targetSessionId)
   }
 
   async function saveClass({ name, original_name, description, properties, schema_name }) {

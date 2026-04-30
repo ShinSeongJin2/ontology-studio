@@ -50,7 +50,7 @@ async def reset_session(session_id: str = "default"):
     """Reset in-memory session state and sandbox workspace files."""
 
     clear_session(session_id)
-    clear_workspace_files()
+    clear_workspace_files(session_id)
     return {"status": "ok"}
 
 
@@ -79,6 +79,7 @@ async def remove_session(session_id: str):
     """Delete a session and all its messages."""
 
     clear_session(session_id)
+    clear_workspace_files(session_id)
     delete_session(session_id)
     return {"status": "ok"}
 
