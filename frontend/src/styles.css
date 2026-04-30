@@ -1969,6 +1969,83 @@ body {
   border-color: var(--text-muted);
 }
 
+.graph-schema-bar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.schema-select-wide {
+  flex: 1;
+  min-width: 0;
+}
+.schema-menu-wrap {
+  position: relative;
+  flex-shrink: 0;
+}
+.btn-schema-delete {
+  color: #e74c3c !important;
+}
+.btn-schema-delete:hover {
+  background: rgba(231, 76, 60, 0.15) !important;
+}
+.schema-delete-menu {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  z-index: 100;
+  min-width: 220px;
+  background: var(--bg-secondary, #1e1e2e);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  padding: 4px;
+  margin-top: 4px;
+}
+.schema-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 12px;
+  border: none;
+  background: none;
+  color: var(--text, #e0e0e0);
+  font-size: 12px;
+  cursor: pointer;
+  border-radius: 4px;
+  text-align: left;
+}
+.schema-menu-item:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+.schema-menu-icon {
+  font-size: 14px;
+  width: 18px;
+  text-align: center;
+  flex-shrink: 0;
+}
+.schema-menu-hint {
+  margin-left: auto;
+  font-size: 10px;
+  color: var(--text-muted, #666);
+}
+.schema-menu-danger {
+  color: #e74c3c;
+}
+.schema-menu-danger:hover {
+  background: rgba(231, 76, 60, 0.12);
+}
+.schema-menu-cancel {
+  color: var(--text-muted, #888);
+  justify-content: center;
+  border-top: 1px solid var(--border);
+  margin-top: 2px;
+  padding-top: 6px;
+}
+
 .graph-filter {
   padding: 6px 10px;
   border-bottom: 1px solid var(--border);
@@ -2074,6 +2151,349 @@ body {
 
 .btn-traverse:hover {
   opacity: 0.85;
+}
+
+.node-detail-header-actions {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+}
+
+/* ── Graph search bar ── */
+.graph-search-bar {
+  display: flex;
+  gap: 4px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.graph-search-input-wrap {
+  flex: 1;
+  position: relative;
+  min-width: 0;
+}
+.graph-search-input {
+  width: 100%;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 4px 24px 4px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  box-sizing: border-box;
+}
+.graph-search-input:focus {
+  border-color: rgba(0, 120, 255, 0.5);
+  outline: none;
+}
+.graph-search-clear {
+  position: absolute;
+  right: 4px;
+  top: 50%;
+  transform: translateY(-50%);
+  background: none;
+  border: none;
+  color: #888;
+  cursor: pointer;
+  font-size: 14px;
+  padding: 0 2px;
+}
+.graph-search-mode {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 4px;
+  border-radius: 4px;
+  font-size: 11px;
+  flex-shrink: 0;
+}
+.graph-search-btn {
+  background: rgba(0, 120, 255, 0.2);
+  border: 1px solid rgba(0, 120, 255, 0.4);
+  color: #60a5fa;
+  padding: 4px 10px;
+  border-radius: 4px;
+  font-size: 11px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.graph-search-btn:hover:not(:disabled) {
+  background: rgba(0, 120, 255, 0.3);
+}
+.graph-search-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.graph-search-info {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 10px;
+  font-size: 11px;
+  color: #00e676;
+  background: rgba(0, 230, 118, 0.05);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.graph-search-clear-btn {
+  background: none;
+  border: none;
+  color: #888;
+  cursor: pointer;
+  font-size: 11px;
+  padding: 2px 6px;
+}
+.graph-search-clear-btn:hover {
+  color: #e0e0e0;
+}
+
+/* ── Multi-selection toolbar ── */
+.multi-select-bar {
+  position: absolute;
+  top: 8px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: rgba(30, 30, 46, 0.95);
+  border: 1px solid rgba(255, 204, 0, 0.4);
+  border-radius: 8px;
+  padding: 6px 14px;
+  backdrop-filter: blur(8px);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+}
+.multi-select-count {
+  font-size: 12px;
+  font-weight: 600;
+  color: #ffcc00;
+}
+.btn-multi-delete {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  background: rgba(231, 76, 60, 0.2);
+  border: 1px solid rgba(231, 76, 60, 0.4);
+  color: #e74c3c;
+  font-size: 11px;
+  padding: 4px 10px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.btn-multi-delete:hover {
+  background: rgba(231, 76, 60, 0.35);
+}
+.btn-multi-cancel {
+  background: none;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  color: #aaa;
+  font-size: 11px;
+  padding: 4px 10px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.btn-multi-cancel:hover {
+  background: rgba(255, 255, 255, 0.05);
+  color: #e0e0e0;
+}
+
+/* ── Node overlay action icons ── */
+.node-overlay {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  display: flex;
+  gap: 4px;
+  z-index: 20;
+  pointer-events: auto;
+}
+.overlay-btn {
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  background: rgba(30, 30, 46, 0.9);
+  color: #ccc;
+  font-size: 14px;
+  transition: transform 0.12s, background 0.12s;
+  backdrop-filter: blur(4px);
+}
+.overlay-btn:hover {
+  transform: scale(1.15);
+  background: rgba(50, 50, 70, 0.95);
+  color: #fff;
+}
+.overlay-delete:hover {
+  background: rgba(231, 76, 60, 0.85);
+  border-color: #e74c3c;
+  color: #fff;
+}
+.overlay-create {
+  cursor: grab;
+}
+.overlay-create:active {
+  cursor: grabbing;
+}
+.overlay-create:hover {
+  background: rgba(0, 120, 255, 0.7);
+  border-color: #018bff;
+  color: #fff;
+}
+
+/* New node input popup */
+.new-node-input-overlay {
+  position: absolute;
+  transform: translateX(-50%);
+  z-index: 100;
+  background: rgba(30, 30, 46, 0.95);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 8px;
+  padding: 10px;
+  min-width: 180px;
+  backdrop-filter: blur(8px);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+}
+
+/* Relationship editor popup */
+.rel-editor-overlay {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  z-index: 100;
+  background: rgba(30, 30, 46, 0.95);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 8px;
+  padding: 10px;
+  min-width: 200px;
+  backdrop-filter: blur(8px);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.rel-editor-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: #aaa;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.rel-editor-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+/* Node class editor in graph panel */
+.node-edit-form {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 4px 0;
+}
+.node-edit-label {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-secondary, #aaa);
+  text-transform: uppercase;
+}
+.node-edit-input {
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  color: #e0e0e0;
+  font-size: 12px;
+  border-radius: 3px;
+  padding: 4px 8px;
+  width: 100%;
+  box-sizing: border-box;
+}
+.node-edit-input:focus {
+  border-color: rgba(0, 120, 255, 0.5);
+  outline: none;
+}
+.node-edit-textarea {
+  resize: vertical;
+  min-height: 40px;
+  font-family: inherit;
+}
+.node-edit-field {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.node-edit-select {
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  color: #e0e0e0;
+  font-size: 11px;
+  border-radius: 3px;
+  padding: 3px 4px;
+}
+.node-edit-prop-row {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+}
+.node-edit-prop-row .prop-input {
+  flex: 1;
+  min-width: 0;
+}
+.node-edit-add-btn {
+  background: none;
+  border: none;
+  color: #666;
+  font-size: 11px;
+  cursor: pointer;
+  padding: 2px 0;
+  text-align: left;
+}
+.node-edit-add-btn:hover {
+  color: #60a5fa;
+}
+.node-edit-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 4px;
+}
+.btn-save-node {
+  background: rgba(0, 120, 255, 0.2);
+  border: 1px solid rgba(0, 120, 255, 0.4);
+  color: #60a5fa;
+  font-size: 11px;
+  padding: 4px 12px;
+  border-radius: 3px;
+  cursor: pointer;
+}
+.btn-save-node:hover {
+  background: rgba(0, 120, 255, 0.3);
+}
+.btn-cancel-node {
+  background: none;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  color: #aaa;
+  font-size: 11px;
+  padding: 4px 12px;
+  border-radius: 3px;
+  cursor: pointer;
+}
+.btn-cancel-node:hover {
+  background: rgba(255, 255, 255, 0.05);
+}
+.btn-delete-node {
+  background: rgba(231, 76, 60, 0.15);
+  border: 1px solid rgba(231, 76, 60, 0.3);
+  color: #e74c3c;
+  font-size: 11px;
+  padding: 4px 12px;
+  border-radius: 3px;
+  cursor: pointer;
+  margin-left: auto;
+}
+.btn-delete-node:hover {
+  background: rgba(231, 76, 60, 0.25);
 }
 
 /* ── Build Upload Zone ── */

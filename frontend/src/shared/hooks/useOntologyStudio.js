@@ -564,6 +564,62 @@ export function useOntologyStudio() {
     await refreshFiles()
   }
 
+  async function saveClass({ name, original_name, description, properties, schema_name }) {
+    await fetch(`${API}/api/schema/classes`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, original_name: original_name || '', description, properties, schema_name }),
+    })
+    await refreshSchema()
+  }
+
+  async function deleteClass(className) {
+    await fetch(`${API}/api/schema/classes/${encodeURIComponent(className)}`, { method: 'DELETE' })
+    await refreshSchema()
+  }
+
+  async function saveRelationship({ name, from_class, to_class, description, properties, schema_name }) {
+    await fetch(`${API}/api/schema/relationships`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, from_class, to_class, description, properties, schema_name }),
+    })
+    await refreshSchema()
+  }
+
+  function selectTargetSchema(schemaName) {
+    targetSchema.value = schemaName
+    if (!schemaName) return
+    // Load intent + golden questions from the selected schema
+    const s = schemas.value.find(sc => sc.name === schemaName)
+    if (s) {
+      const brief = modeState.build.buildBrief
+      if (s.intent) brief.intent = s.intent
+      if (s.golden_questions?.length) {
+        brief.goldenQuestions.splice(0, brief.goldenQuestions.length, ...s.golden_questions)
+      }
+    }
+  }
+
+  async function saveSchemaBrief(schemaName) {
+    const s = schemas.value.find(sc => sc.name === schemaName)
+    if (!s) return
+    await fetch(`${API}/api/schemas/${encodeURIComponent(s.id)}/brief`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        intent: buildIntent.value.trim(),
+        golden_questions: normalizedBuildGoldenQuestions.value,
+      }),
+    })
+  }
+
+  async function deleteRelationship(name, fromClass, toClass) {
+    const params = new URLSearchParams({ from_class: fromClass, to_class: toClass })
+    await fetch(`${API}/api/schema/relationships/${encodeURIComponent(name)}?${params}`, { method: 'DELETE' })
+    await refreshSchema()
+  }
+
   function autoUpdateSessionTitle(currentMode, prompt) {
     // Count total user messages across all modes
     const totalUserMsgs = MODE_KEYS.reduce(
@@ -663,6 +719,21 @@ export function useOntologyStudio() {
 
     es.addEventListener('neo4j_update', () => {
       refreshSchema()
+    })
+
+    es.addEventListener('schema_created', (event) => {
+      const data = JSON.parse(event.data)
+      const schemaName = data.schema_name
+      if (schemaName) {
+        selectedSchema.value = schemaName
+        // Update session's schema_name on server
+        if (!sessionId.value.startsWith('pending_')) {
+          fetch(
+            `${API}/api/sessions/${encodeURIComponent(sessionId.value)}?schema_name=${encodeURIComponent(schemaName)}`,
+            { method: 'PATCH' }
+          ).then(() => fetchSessions()).catch(() => {})
+        }
+      }
     })
 
     es.addEventListener('traversed_nodes', (event) => {
@@ -806,6 +877,14 @@ export function useOntologyStudio() {
             text: prompt,
             mode: currentMode,
           }
+
+    // Save brief to schema when building (first message)
+    if (currentMode === 'build' && !isFollowUp) {
+      const schemaName = targetSchema.value || newSchemaName.value || ''
+      if (schemaName) {
+        saveSchemaBrief(schemaName).catch(() => {})
+      }
+    }
 
     startStreamingRequest({
       currentMode,
@@ -992,6 +1071,8 @@ export function useOntologyStudio() {
     createNewSession,
     currentModeMeta,
     deleteSession,
+    deleteClass,
+    deleteRelationship,
     deleteUploadFile,
     doUploadAndNotify,
     downloadFile,
@@ -1015,6 +1096,10 @@ export function useOntologyStudio() {
     refreshAll,
     removeBuildGoldenQuestion,
     resetSession,
+    saveClass,
+    saveRelationship,
+    saveSchemaBrief,
+    selectTargetSchema,
     schema,
     schemas,
     selectedSchema,
