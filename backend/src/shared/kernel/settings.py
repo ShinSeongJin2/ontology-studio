@@ -36,6 +36,7 @@ class Settings:
     ollama_base_url: str
     ollama_embedding_model: str
     embedding_chunk_max_tokens: int
+    history_compression_max_tokens: int
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -84,4 +85,7 @@ def get_settings() -> Settings:
         ollama_base_url=os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434"),
         ollama_embedding_model=os.environ.get("OLLAMA_EMBEDDING_MODEL", "qwen3-embedding"),
         embedding_chunk_max_tokens=int(os.environ.get("EMBEDDING_CHUNK_MAX_TOKENS", "1000")),
+        history_compression_max_tokens=int(
+            os.environ.get("HISTORY_COMPRESSION_MAX_TOKENS", "256000")
+        ),
     )

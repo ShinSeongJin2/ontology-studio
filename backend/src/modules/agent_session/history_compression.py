@@ -12,12 +12,14 @@ import logging
 from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
+from ...shared.kernel.settings import get_settings
+
 logger = logging.getLogger(__name__)
 
 # Korean text: ~2.5 chars per token (conservative)
 _CHARS_PER_TOKEN = 2.5
 # Max tokens for conversation history (leave room for system prompt + tools + response)
-_MAX_HISTORY_TOKENS = 12_000
+_MAX_HISTORY_TOKENS = 256_000
 # Max chars kept per tool result in older messages
 _TOOL_RESULT_MAX_CHARS = 2000
 _TOOL_RESULT_SUFFIX = "\n... [결과가 잘렸습니다]"
@@ -49,9 +51,9 @@ def compress_messages(
     """Compress a message list to fit within token budget.
 
     Strategy:
-    1. Truncate large tool results in older messages (keep recent ones intact).
-    2. Drop oldest messages from front if still over budget.
-    3. Never drop the very last HumanMessage.
+    1. Always preserve user-provided mission messages (HumanMessage).
+    2. Truncate large older tool results while keeping recent tool results intact.
+    3. Drop older non-user messages first, preserving recent tool results as long as possible.
     """
     if not messages or _total_tokens(messages) <= max_tokens:
         return messages
@@ -72,17 +74,62 @@ def compress_messages(
                 continue
         compressed.append(msg)
 
-    # Step 2: Drop oldest messages if still over budget
-    while len(compressed) > 1 and _total_tokens(compressed) > max_tokens:
-        # Remove the oldest message, but keep at least the last message
-        removed = compressed.pop(0)
+    def _remove_orphaned_tool_messages(current: list, removed_msg) -> list:
         # If we removed an AIMessage with tool_calls, also remove orphaned ToolMessages
-        if isinstance(removed, AIMessage) and removed.tool_calls:
-            tc_ids = {tc["id"] for tc in removed.tool_calls if "id" in tc}
-            compressed = [
-                m for m in compressed
+        if isinstance(removed_msg, AIMessage) and removed_msg.tool_calls:
+            tc_ids = {tc["id"] for tc in removed_msg.tool_calls if "id" in tc}
+            return [
+                m for m in current
                 if not (isinstance(m, ToolMessage) and m.tool_call_id in tc_ids)
             ]
+        return current
+
+    def _recent_tool_call_ids() -> set[str]:
+        recent_boundary = max(0, len(compressed) - keep_recent)
+        return {
+            msg.tool_call_id
+            for index, msg in enumerate(compressed)
+            if (
+                isinstance(msg, ToolMessage)
+                and index >= recent_boundary
+                and msg.tool_call_id
+            )
+        }
+
+    def _is_recent_tool_context(index: int, msg, recent_tool_ids: set[str]) -> bool:
+        recent_boundary = max(0, len(compressed) - keep_recent)
+        if isinstance(msg, ToolMessage):
+            return index >= recent_boundary
+        if isinstance(msg, AIMessage) and msg.tool_calls:
+            return any(
+                tool_call.get("id") in recent_tool_ids
+                for tool_call in msg.tool_calls
+            )
+        return False
+
+    def _find_removal_index(prefer_recent_tools: bool) -> int | None:
+        recent_tool_ids = _recent_tool_call_ids()
+        for index, msg in enumerate(compressed):
+            if isinstance(msg, HumanMessage):
+                continue
+            if prefer_recent_tools and _is_recent_tool_context(
+                index,
+                msg,
+                recent_tool_ids,
+            ):
+                continue
+            return index
+        return None
+
+    # Step 2: Drop oldest non-user messages if still over budget. User mission
+    # messages may cause the result to exceed max_tokens, but they must survive.
+    while len(compressed) > 1 and _total_tokens(compressed) > max_tokens:
+        removal_index = _find_removal_index(prefer_recent_tools=True)
+        if removal_index is None:
+            break
+
+        removed = compressed.pop(removal_index)
+        compressed = _remove_orphaned_tool_messages(compressed, removed)
 
     original_count = len(messages)
     final_count = len(compressed)
@@ -98,8 +145,12 @@ def compress_messages(
 class HistoryCompressionMiddleware(AgentMiddleware):
     """Compress conversation history before each LLM call to prevent context overflow."""
 
-    def __init__(self, max_tokens: int = _MAX_HISTORY_TOKENS):
-        self.max_tokens = max_tokens
+    def __init__(self, max_tokens: int | None = None):
+        self.max_tokens = (
+            max_tokens
+            if max_tokens is not None
+            else get_settings().history_compression_max_tokens
+        )
 
     def wrap_model_call(self, request, handler):
         """Compress messages in the request, then forward to the model."""
